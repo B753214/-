@@ -21,7 +21,7 @@ Notion MCP 可以使用 Streamable HTTP (`NOTION_MCP_URL`，可选 Bearer `NOTIO
 python -m rag_agent.tools
 ```
 
-根据输出在 `.env` 填写只读工具名 `NOTION_MCP_TOOL` 和页面 ID 参数名 `NOTION_MCP_PAGE_ARGUMENT`。`NOTION_PAGE_IDS` 支持逗号分隔多个 ID。不同 MCP 服务返回结构可能不同；复杂嵌套页面需按实际工具结果完善解析。文档应具有读取权限。
+根据输出在 `.env` 填写只读工具名 `NOTION_MCP_TOOL` 和页面 ID 参数名 `NOTION_MCP_PAGE_ARGUMENT`。`NOTION_PAGE_IDS` 支持逗号分隔多个 ID，示例默认指向 [Webpack 页面](https://app.notion.com/p/Webpack-24fa020ef1cf80b68685fcfade70e314?source=copy_link)。`NOTION_INCLUDE_SUBPAGES=true` 会递归读取 MCP 结果中显式的 `child_page` 块及 Notion 页面链接，按页面 ID 去重；`NOTION_MAX_PAGES` 限制遍历上限。此行为依赖 MCP 工具返回子页面链接或块；如果工具只返回当前页面正文，应换用能列出子页面的只读工具，或显式列出页面 ID。页面和子页面都须授予 MCP 读取权限。索引构建完成后可通过返回的 `documents` 数量核对导入范围。
 
 把可提取文字的 PDF 放进 `data/pdfs/`，然后建立索引并启动：
 

@@ -27,6 +27,8 @@ class Settings:
     notion_tool: str = os.getenv("NOTION_MCP_TOOL", "")
     notion_page_argument: str = os.getenv("NOTION_MCP_PAGE_ARGUMENT", "page_id")
     notion_page_ids: tuple[str, ...] = tuple(x.strip().replace("-", "") for x in os.getenv("NOTION_PAGE_IDS", "").split(",") if x.strip())
+    notion_include_subpages: bool = enabled("NOTION_INCLUDE_SUBPAGES")
+    notion_max_pages: int = int(os.getenv("NOTION_MAX_PAGES", "1000"))
     bm25_enabled: bool = enabled("BM25_ENABLED")
     rerank_enabled: bool = enabled("RERANK_ENABLED", False)
     web_fallback_enabled: bool = enabled("WEB_FALLBACK_ENABLED")

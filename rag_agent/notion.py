@@ -1,7 +1,44 @@
 """Read-only adapter for an existing Notion MCP server."""
 import json
+import re
 from urllib.parse import urlparse
 from .config import Settings
+
+
+PAGE_ID = re.compile(r"(?<![a-fA-F0-9])(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})(?![a-fA-F0-9])")
+NOTION_LINK = re.compile(r"https?://(?:[\w-]+\.)?(?:notion\.so|notion\.site|notion\.com)/[^\s<>\]\)\"']+", re.I)
+
+
+def child_page_ids(content: str) -> list[str]:
+    """Find linked Notion pages and explicit child_page blocks in MCP output."""
+    found: list[str] = []
+
+    def add(value: str):
+        match = PAGE_ID.search(value)
+        if match:
+            page_id = match.group().replace("-", "").lower()
+            if page_id not in found:
+                found.append(page_id)
+
+    for link in NOTION_LINK.findall(content):
+        add(urlparse(link).path)
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        payload = None
+
+    def walk(value):
+        if isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            if value.get("type") == "child_page" or value.get("object") == "child_page":
+                add(str(value.get("id", "")))
+            for item in value.values():
+                walk(item)
+
+    walk(payload)
+    return found
 
 
 def text_from_result(result) -> str:
@@ -44,11 +81,23 @@ async def _read(session, settings: Settings) -> list[tuple[str, str]]:
     tools = await session.list_tools()
     if settings.notion_tool not in {tool.name for tool in tools.tools}:
         raise RuntimeError(f"MCP 工具 {settings.notion_tool!r} 不存在，请检查工具列表")
+    if settings.notion_max_pages < 1:
+        raise ValueError("NOTION_MAX_PAGES 必须大于 0")
     pages = []
-    for page_id in settings.notion_page_ids:
+    queue = [page_id.lower() for page_id in settings.notion_page_ids]
+    visited = set()
+    while queue:
+        page_id = queue.pop(0)
+        if page_id in visited:
+            continue
+        if len(visited) >= settings.notion_max_pages:
+            raise RuntimeError(f"Notion 页面超过 NOTION_MAX_PAGES={settings.notion_max_pages}，已停止导入")
+        visited.add(page_id)
         result = await session.call_tool(settings.notion_tool, {settings.notion_page_argument: page_id})
         content = text_from_result(result)
         if not content.strip():
             raise RuntimeError(f"Notion 页面 {page_id} 返回空内容")
         pages.append((page_id, content))
+        if settings.notion_include_subpages:
+            queue.extend(child for child in child_page_ids(content) if child not in visited)
     return pages
