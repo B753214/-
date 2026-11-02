@@ -12,7 +12,7 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from openai import AsyncOpenAI
 from rank_bm25 import BM25Okapi
 from .config import Settings
-from .notion import read_pages
+from .notion import page_title, read_pages
 from .retrieval import Hit, fuse_rrf, language_of, relevant, tokens
 
 
@@ -25,7 +25,7 @@ class Engine:
         self.client = AsyncOpenAI(api_key=self.config.openai_key or "unset", base_url=self.config.openai_base_url or None)
 
     def _embed(self):
-        return OpenAIEmbedding(model=self.config.embed_model, api_key=self.config.openai_key, api_base=self.config.openai_base_url or None)
+        return OpenAIEmbedding(model_name=self.config.embed_model, embed_batch_size=10, api_key=self.config.openai_key, api_base=self.config.openai_base_url or None)
 
     def load(self) -> bool:
         if not (self.config.index_dir / "docstore.json").exists():
@@ -45,7 +45,7 @@ class Engine:
         documents = []
         if self.config.notion_page_ids:
             for page_id, text in await read_pages(self.config):
-                documents.append(Document(text=text, id_=f"notion:{page_id}", metadata={"title": f"Notion {page_id}", "source": f"https://www.notion.so/{page_id}", "kind": "notion"}))
+                documents.append(Document(text=text, id_=f"notion:{page_id}", metadata={"title": page_title(text, page_id), "source": f"https://app.notion.com/p/{page_id}", "kind": "notion"}))
         for path in sorted(self.config.pdf_dir.glob("*.pdf")):
             with pymupdf.open(path) as pdf:
                 for number, page in enumerate(pdf, 1):

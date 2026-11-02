@@ -6,11 +6,24 @@ from .config import Settings
 
 
 PAGE_ID = re.compile(r"(?<![a-fA-F0-9])(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})(?![a-fA-F0-9])")
-NOTION_LINK = re.compile(r"https?://(?:[\w-]+\.)?(?:notion\.so|notion\.site|notion\.com)/[^\s<>\]\)\"']+", re.I)
+PAGE_TAG = re.compile(r'<page\s+url="([^"]+)"[^>]*>', re.I)
+PROPERTIES = re.compile(r"<properties>\s*(\{.*?\})\s*</properties>", re.S)
+
+
+def page_title(content: str, page_id: str) -> str:
+    match = PROPERTIES.search(content)
+    if match:
+        try:
+            title = json.loads(match.group(1)).get("title")
+            if isinstance(title, str) and title.strip():
+                return re.sub(r"<[^>]+>", "", title).strip()
+        except ValueError:
+            pass
+    return f"Notion {page_id}"
 
 
 def child_page_ids(content: str) -> list[str]:
-    """Find linked Notion pages and explicit child_page blocks in MCP output."""
+    """Find direct child pages in Notion fetch markup or explicit child_page blocks."""
     found: list[str] = []
 
     def add(value: str):
@@ -20,12 +33,15 @@ def child_page_ids(content: str) -> list[str]:
             if page_id not in found:
                 found.append(page_id)
 
-    for link in NOTION_LINK.findall(content):
-        add(urlparse(link).path)
     try:
         payload = json.loads(content)
     except (TypeError, ValueError):
         payload = None
+
+    def scan_markup(markup: str):
+        body = markup.split("<content>", 1)[-1].split("</content>", 1)[0]
+        for link in PAGE_TAG.findall(body):
+            add(urlparse(link).path)
 
     def walk(value):
         if isinstance(value, list):
@@ -36,17 +52,26 @@ def child_page_ids(content: str) -> list[str]:
                 add(str(value.get("id", "")))
             for item in value.values():
                 walk(item)
+        elif isinstance(value, str):
+            scan_markup(value)
 
-    walk(payload)
+    walk(payload if payload is not None else content)
     return found
 
 
 def text_from_result(result) -> str:
     if result.isError:
         raise RuntimeError("Notion MCP 读取失败")
-    if result.structuredContent:
-        return json.dumps(result.structuredContent, ensure_ascii=False)
-    return "\n".join(getattr(block, "text", "") for block in result.content if getattr(block, "type", "") == "text")
+    raw = (result.structuredContent if result.structuredContent else
+           "\n".join(getattr(block, "text", "") for block in result.content if getattr(block, "type", "") == "text"))
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return raw
+    if isinstance(raw, dict) and isinstance(raw.get("text"), str):
+        return raw["text"]
+    return json.dumps(raw, ensure_ascii=False)
 
 
 async def read_pages(settings: Settings) -> list[tuple[str, str]]:
