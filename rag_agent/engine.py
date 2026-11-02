@@ -33,7 +33,7 @@ class Engine:
         return OpenAIEmbedding(model_name=self.config.embed_model, embed_batch_size=10, api_key=self.config.openai_key, api_base=self.config.openai_base_url or None)
 
     def _chat_extra(self, model: str) -> dict:
-        if "dashscope.aliyuncs.com" in self.config.openai_base_url and model.startswith("qwen3"):
+        if "dashscope.aliyuncs.com" in self.config.openai_base_url and (model.startswith("qwen3") or model == "qwen-flash"):
             return {"enable_thinking": False}
         return {}
 
@@ -98,8 +98,8 @@ class Engine:
         prompt = ("Rate whether each passage contains evidence to answer the question. Return JSON only: "
                   "{\"scores\": [numbers between 0 and 1 in candidate order]}. Do not reward keyword overlap without answer evidence.\n"
                   f"Question: {question}\nCandidates: {json.dumps(candidates, ensure_ascii=False)}")
-        response = await self.client.chat.completions.create(model=self.config.router_model, temperature=0,
-            extra_body=self._chat_extra(self.config.router_model), response_format={"type": "json_object"},
+        response = await self.client.chat.completions.create(model=self.config.rerank_model, temperature=0,
+            extra_body=self._chat_extra(self.config.rerank_model), response_format={"type": "json_object"},
             messages=[{"role": "user", "content": prompt}])
         scores = json.loads(response.choices[0].message.content or "{}").get("scores", [])
         if not isinstance(scores, list) or len(scores) != len(hits):

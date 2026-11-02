@@ -30,7 +30,7 @@ AIROBOT_LLM_API_KEY=你的DashScope密钥
 NOTION_PAGE_IDS=24fa020ef1cf80b68685fcfade70e314
 ```
 
-如果只用 PDF，可将 `NOTION_PAGE_IDS` 留空。默认回答模型为 `qwen3.7-max`，路由和重排模型为 `qwen3.7-flash`，向量模型为 `text-embedding-v4`，音频模型为 `qwen3-asr-flash`。DashScope 的 Qwen3 文本调用默认关闭思考模式以缩短等待时间；其他兼容服务不额外传此参数。问答页使用流式回答，长答案会逐步显示；模型请求 30 秒超时，页面会显示超时提示。默认地址是 DashScope 北京兼容接口；使用其他区域或兼容服务时，调整 `.env` 中的模型和地址。切换 embedding 模型后必须重新建索引。
+如果只用 PDF，可将 `NOTION_PAGE_IDS` 留空。默认回答模型为 `qwen3.7-max`，路由模型为 `qwen-flash`，重排模型为 `qwen3.7-flash`，向量模型为 `text-embedding-v4`，音频模型为 `qwen3-asr-flash`。DashScope 的文本模型调用默认关闭思考模式以缩短等待时间；其他兼容服务不额外传此参数。问答页使用流式回答，长答案会逐步显示；模型请求 30 秒超时，页面会显示超时提示。默认地址是 DashScope 北京兼容接口；使用其他区域或兼容服务时，调整 `.env` 中的模型和地址。切换 embedding 模型后必须重新建索引。
 
 先导入文档，再启动问答服务：
 
@@ -97,7 +97,7 @@ agent/
 | --- | --- | --- |
 | `AIROBOT_LLM_API_KEY` | 云端模型密钥 | 必填 |
 | `AIROBOT_LLM_BASE_URL` | OpenAI 兼容接口地址 | DashScope 北京地址 |
-| `AIROBOT_LLM_MODEL` / `AIROBOT_ROUTER_MODEL` / `EMBED_MODEL` / `TRANSCRIBE_MODEL` | 回答、路由、向量和音频模型 | 见 `.env.example` |
+| `AIROBOT_LLM_MODEL` / `AIROBOT_ROUTER_MODEL` / `AIROBOT_RERANK_MODEL` / `EMBED_MODEL` / `TRANSCRIBE_MODEL` | 回答、路由、重排、向量和音频模型 | 见 `.env.example` |
 | `NOTION_PAGE_IDS` | Notion 入口页面 ID，多个用逗号分隔 | Webpack 示例页 |
 | `NOTION_INCLUDE_SUBPAGES` / `NOTION_MAX_PAGES` | 是否遍历子页面及页面数上限 | `true` / `1000` |
 | `BM25_ENABLED` / `RERANK_ENABLED` | 关键词召回和云端重排 | `true` / `true` |
