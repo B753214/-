@@ -1,0 +1,8 @@
+.env
+.venv/
+.vendor/
+__pycache__/
+.pytest_cache/
+data/index/
+data/pdfs/*
+!data/pdfs/.gitkeep
