@@ -39,7 +39,7 @@ def test_identity_question_skips_retrieval_and_web():
     assert conversational_answer("Webpack 的 HMR 是什么？") is None
 
 
-def test_low_relevance_without_web_key_returns_no_evidence():
+def test_low_relevance_without_web_key_reports_unavailable_fallback():
     engine = Engine(replace(Settings(), openai_key="test", tavily_key="", web_fallback_enabled=True))
 
     async def no_hits(_):
@@ -47,6 +47,27 @@ def test_low_relevance_without_web_key_returns_no_evidence():
 
     engine._retrieve = no_hits
     result = asyncio.run(engine.ask("知识库里没有的内容是什么？"))
-    assert result["source_mode"] == "none"
+    assert result["source_mode"] == "unavailable"
     assert result["sources"] == []
-    assert "未找到" in result["answer"]
+    assert "知识库未找到" in result["answer"]
+    assert "联网" in result["answer"]
+
+
+def test_low_relevance_with_web_key_falls_back_to_web():
+    engine = Engine(replace(Settings(), openai_key="test", tavily_key="test", web_fallback_enabled=True))
+
+    async def no_hits(_):
+        return [], 0.0
+
+    async def web_hits(_):
+        return [Hit("https://example.com", "Evidence", {"title": "Web", "source": "https://example.com", "kind": "web"})]
+
+    async def answer(*_):
+        return "来自网络的答案 [1]"
+
+    engine._retrieve = no_hits
+    engine._web = web_hits
+    engine._generate = answer
+    result = asyncio.run(engine.ask("我的知识库里这个问题如何回答？"))
+    assert result["source_mode"] == "web"
+    assert result["sources"][0]["kind"] == "web"

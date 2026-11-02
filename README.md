@@ -2,7 +2,9 @@
 
 基于 Python、FastAPI 和 LlamaIndex 的中英文 RAG 问答应用。用户可输入文字或音频，应用只输出文字。知识来源为 Notion 页面和服务端 PDF；问答页不提供文档上传功能。
 
-检索流程：常见的问候和“你是谁”直接回答；知识问题走向量检索与可选 BM25 召回 → RRF 融合 → 可选重排 → 证据质量判断 → 生成带来源的回答。证据不足且已配置 Tavily 时才回退到网络搜索。中文问题用中文回答，英文问题用英文回答。
+问答先判断是否需要查资料，再选择资料来源。稳定的数学、算法、协议和成熟技术概念由模型直接回答；内部资料走 Notion/PDF 知识库；当前信息、高风险事实和陌生的新名词需要外部核实；用户给出链接时优先读取该链接。中文问题用中文回答，英文问题用英文回答。
+
+知识库检索使用向量与可选 BM25 召回、RRF 融合、可选重排。网络搜索通过 Tavily 完成；对比和调研问题可拆成 2–3 个并行查询。常见问候和应用身份问题直接回答，不调用模型或搜索。
 
 ## 环境要求
 
@@ -42,6 +44,8 @@ uvicorn rag_agent.app:app --host 127.0.0.1 --port 8000
 **启动服务只加载已有索引，不会重新读取文档。** Notion 或 PDF 内容变更后，再运行 `python -m rag_agent.ingest`，随后重启服务。目前每次导入都会全量重建索引。
 
 ## 添加知识库文档
+
+在问题中明确写“我的知识库”“这份文档”“根据我的 Notion 文档”等，会选择本地知识库。普通稳定概念不会自动查知识库；若希望按内部文档回答，请在问题中点明文档或提供 Notion 页面链接。
 
 ### Notion：多个链接
 
@@ -97,12 +101,12 @@ agent/
 | `NOTION_PAGE_IDS` | Notion 入口页面 ID，多个用逗号分隔 | Webpack 示例页 |
 | `NOTION_INCLUDE_SUBPAGES` / `NOTION_MAX_PAGES` | 是否遍历子页面及页面数上限 | `true` / `1000` |
 | `BM25_ENABLED` / `RERANK_ENABLED` | 关键词召回和云端重排 | `true` / `false` |
-| `WEB_FALLBACK_ENABLED` / `TAVILY_API_KEY` | 低相关性时使用网页搜索 | `true` / 空 |
+| `WEB_FALLBACK_ENABLED` / `TAVILY_API_KEY` | 是否允许网络搜索及网页提取 | `true` / 空 |
 | `VECTOR_TOP_K` / `BM25_TOP_K` / `FUSION_TOP_K` / `RERANK_TOP_K` | 各阶段候选数量 | `8` / `8` / `10` / `4` |
-| `RELEVANCE_THRESHOLD` | 判断是否需要网页搜索的阈值 | `0.70` |
+| `RELEVANCE_THRESHOLD` | 内部文档检索的可靠性阈值 | `0.70` |
 | `MAX_AUDIO_MB` | 单个音频文件大小上限 | `7` |
 
-默认关闭重排以减少延迟。未配置 `TAVILY_API_KEY` 时，低相关性问题会返回“未找到足够可靠的资料”，不会尝试联网；不需要网络回退也可设 `WEB_FALLBACK_ENABLED=false`。相关性阈值应结合实际中英文问题校准，开启重排前后评分含义不同。索引构建、问题向量化、重排和回答会产生云端 API 用量。
+默认关闭重排以减少延迟。知识库检索结果低于 `RELEVANCE_THRESHOLD` 时，如已启用网络搜索并配置 `TAVILY_API_KEY`，会继续搜索网页；否则明确说明搜索不可用，不会猜测答案。`WEB_FALLBACK_ENABLED=false` 可关闭网络搜索。相关性阈值应结合实际问题校准，开启重排前后评分含义不同。路由对明确线索使用快速规则，对模糊问题调用一次模型判断是否需要查资料，因此可能增加少量延迟。索引构建、问题向量化、重排和回答会产生云端 API 用量。
 
 ## 接口与测试
 
@@ -110,7 +114,7 @@ agent/
 | --- | --- |
 | `GET /` | 问答页 |
 | `GET /health` | 索引就绪状态、分块数及检索开关 |
-| `POST /api/ask` | JSON `{"question":"..."}`；返回文字答案、语言、来源和耗时 |
+| `POST /api/ask` | JSON `{"question":"..."}`；返回文字答案、语言、路由原因、来源和耗时 |
 | `POST /api/transcribe` | multipart `audio`；返回转写文字，确认后可作为问题发送 |
 
 音频支持 mp3、wav、webm、ogg，输出始终为文字。运行测试：

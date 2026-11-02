@@ -3,7 +3,9 @@ import base64
 import json
 import re
 import time
+from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pymupdf
 from llama_index.core import Document, StorageContext, VectorStoreIndex, load_index_from_storage
@@ -12,8 +14,9 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from openai import AsyncOpenAI
 from rank_bm25 import BM25Okapi
 from .config import Settings
-from .notion import page_title, read_pages
+from .notion import PAGE_ID, page_title, read_pages
 from .retrieval import Hit, conversational_answer, fuse_rrf, language_of, relevant, tokens
+from .routing import NeedDecision, explicit_need, public_web_url, source_for
 
 
 class Engine:
@@ -96,12 +99,77 @@ class Engine:
         graded.sort(key=lambda h: h.score, reverse=True)
         return graded[:self.config.rerank_top_k], max(h.score for h in graded)
 
+    async def _web_queries(self, question: str) -> list[str]:
+        if not re.search(r"比较|对比|区别|调研|选型|\b(?:compare|comparison|versus|vs\.?|research)\b", question, re.I):
+            return [question]
+        prompt = ("Generate 2 or 3 distinct, focused web search queries for this comparison or research question. "
+                  "Return JSON only: {\"queries\":[\"...\"]}. Keep the question's language and do not add private information.\n"
+                  f"Question: {question}")
+        response = await self.client.chat.completions.create(model=self.config.llm_model, temperature=0,
+            response_format={"type": "json_object"}, messages=[{"role": "user", "content": prompt}])
+        try:
+            queries = json.loads(response.choices[0].message.content or "{}").get("queries", [])
+        except ValueError:
+            queries = []
+        if not isinstance(queries, list):
+            queries = []
+        return [q.strip() for q in queries[:3] if isinstance(q, str) and q.strip()] or [question]
+
     async def _web(self, question: str) -> list[Hit]:
         if not self.config.tavily_key:
             raise RuntimeError("已触发网络搜索，但未配置 TAVILY_API_KEY")
         from tavily import AsyncTavilyClient
-        result = await AsyncTavilyClient(api_key=self.config.tavily_key).search(question, max_results=5, search_depth="basic")
-        return [Hit(item.get("url", ""), item.get("content", ""), {"title": item.get("title", "网页"), "source": item.get("url", ""), "kind": "web"}) for item in result.get("results", []) if item.get("content")]
+        client = AsyncTavilyClient(api_key=self.config.tavily_key)
+        results = await asyncio.gather(*(client.search(q, max_results=5, search_depth="basic") for q in await self._web_queries(question)))
+        seen = set()
+        hits = []
+        for result in results:
+            for item in result.get("results", []):
+                url = item.get("url", "")
+                if item.get("content") and url not in seen:
+                    seen.add(url)
+                    hits.append(Hit(url, item["content"], {"title": item.get("title", "网页"), "source": url, "kind": "web"}))
+        return hits[:8]
+
+    async def _extract_url(self, url: str, question: str) -> list[Hit]:
+        if not public_web_url(url):
+            raise ValueError("不能通过网络提取本地或私有地址")
+        from tavily import AsyncTavilyClient
+        result = await AsyncTavilyClient(api_key=self.config.tavily_key).extract(urls=[url], format="text", query=question)
+        return [Hit(item.get("url", url), item.get("raw_content") or item.get("content", ""),
+                    {"title": urlparse(url).hostname or url, "source": item.get("url", url), "kind": "web"})
+                for item in result.get("results", []) if item.get("raw_content") or item.get("content")]
+
+    async def _decide_need(self, question: str) -> NeedDecision:
+        explicit = explicit_need(question)
+        if explicit is not None:
+            return explicit
+        prompt = ("Decide ONLY whether an accurate answer requires external information. "
+                  "Search for time-sensitive facts, high-stakes medical/legal/financial/political matters, unfamiliar or new names, "
+                  "user-specific data, and supplied URLs. Do not search for stable math, algorithms, protocols, or mature concepts. "
+                  "When uncertain about a fact, choose search. Return JSON only, such as {\"search\":true} or {\"search\":false}.\n"
+                  f"Question: {question}")
+        response = await self.client.chat.completions.create(model=self.config.llm_model, temperature=0,
+            response_format={"type": "json_object"}, messages=[{"role": "user", "content": prompt}])
+        try:
+            decision = json.loads(response.choices[0].message.content or "{}").get("search")
+        except ValueError:
+            decision = None
+        return NeedDecision(decision is not False, "uncertain" if decision is not False else "stable_concept")
+
+    async def _generate(self, question: str, lang: str, hits: list[Hit] | None = None) -> str:
+        if hits is None:
+            instruction = ("用中文回答。只回答稳定的通用知识；如果问题依赖最新信息、个人资料或你没有把握，明确说明需要核实，不要编造。"
+                           if lang == "zh" else "Answer in English. Answer stable general knowledge only. If current or private facts are needed, say they need verification; do not guess.")
+            user_content = question
+        else:
+            context = "\n\n".join(f"[{i}] {h.metadata.get('title', '')} | {h.metadata.get('source', '')}\n{h.text[:12000 if len(hits) == 1 else 1800]}" for i, h in enumerate(hits, 1))
+            instruction = ("仅根据资料回答。中文问题用中文回答，英文问题用英文回答。引用资料时使用 [1] 这样的编号；资料不足就明确说明。"
+                           if lang == "zh" else "Answer in English only, using the supplied evidence. Cite passages as [1], [2]. If evidence is insufficient, say so.")
+            user_content = f"Question: {question}\n\nEvidence:\n{context}"
+        response = await self.client.chat.completions.create(model=self.config.llm_model, temperature=0,
+            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": user_content}])
+        return response.choices[0].message.content or ""
 
     async def ask(self, question: str) -> dict:
         question = question.strip()
@@ -115,24 +183,58 @@ class Engine:
                     "total_ms": round((time.perf_counter() - start) * 1000)}
         if not self.config.openai_key:
             raise RuntimeError("请在 .env 设置 OPENAI_API_KEY")
-        hits, vector_score = await self._retrieve(question)
-        retrieved_ms = round((time.perf_counter() - start) * 1000)
-        hits, quality = await self._rank(question, hits, vector_score)
-        source_mode = "knowledge_base"
-        if not relevant(quality, self.config.relevance_threshold):
-            if self.config.web_fallback_enabled and self.config.tavily_key:
-                hits = await self._web(question)
-                source_mode = "web"
-            else:
+        need = await self._decide_need(question)
+        if not need.search:
+            answer = await self._generate(question, lang)
+            return {"answer": answer, "language": lang, "source_mode": "model", "sources": [], "retrieval_ms": 0,
+                    "route_reason": need.reason, "total_ms": round((time.perf_counter() - start) * 1000)}
+
+        source_mode, url = source_for(question, need.reason)
+        retrieval_start = time.perf_counter()
+        if source_mode == "knowledge_base":
+            hits, vector_score = await self._retrieve(question)
+            hits, quality = await self._rank(question, hits, vector_score)
+            if not relevant(quality, self.config.relevance_threshold):
+                if self.config.web_fallback_enabled and self.config.tavily_key:
+                    hits = await self._web(question)
+                    source_mode = "web"
+                elif self.config.web_fallback_enabled:
+                    answer = ("知识库未找到足够可靠的资料；需要继续联网查证，但当前未配置网络搜索。" if lang == "zh"
+                              else "The knowledge base did not provide reliable evidence, and web search is not configured.")
+                    return {"answer": answer, "language": lang, "source_mode": "unavailable", "sources": [],
+                            "retrieval_ms": round((time.perf_counter() - retrieval_start) * 1000),
+                            "route_reason": "knowledge_base_low_quality",
+                            "total_ms": round((time.perf_counter() - start) * 1000)}
+                else:
+                    hits = []
+        elif source_mode == "notion_url":
+            match = PAGE_ID.search(url or "")
+            if not match:
                 hits = []
-                source_mode = "none"
+            else:
+                page_id = match.group().replace("-", "").lower()
+                pages = await read_pages(replace(self.config, notion_page_ids=(page_id,), notion_include_subpages=False))
+                hits = [Hit(page_id, content, {"title": page_title(content, page_id), "source": url, "kind": "notion"})
+                        for _, content in pages]
+        elif not self.config.web_fallback_enabled or not self.config.tavily_key:
+            answer = ("这个问题需要查证外部资料，但当前未配置可用的网络搜索。" if lang == "zh"
+                      else "This question needs external verification, but web search is not configured.")
+            return {"answer": answer, "language": lang, "source_mode": "unavailable", "sources": [], "retrieval_ms": 0,
+                    "route_reason": need.reason, "total_ms": round((time.perf_counter() - start) * 1000)}
+        elif source_mode == "web_url":
+            hits = await self._extract_url(url or "", question)
+        else:
+            hits = await self._web(question)
+        retrieved_ms = round((time.perf_counter() - retrieval_start) * 1000)
         if not hits:
-            return {"answer": "未找到足够可靠的资料来回答这个问题。" if lang == "zh" else "I couldn't find reliable information to answer that question.", "language": lang, "source_mode": source_mode, "sources": [], "retrieval_ms": retrieved_ms, "total_ms": round((time.perf_counter() - start) * 1000)}
-        context = "\n\n".join(f"[{i}] {h.metadata.get('title', '')} | {h.metadata.get('source', '')}\n{h.text[:1800]}" for i, h in enumerate(hits, 1))
-        instruction = ("仅根据资料回答。中文问题用中文回答，英文问题用英文回答。引用资料时使用 [1] 这样的编号；资料不足就明确说明。"
-                       if lang == "zh" else "Answer in English only, using the supplied evidence. Cite passages as [1], [2]. If evidence is insufficient, say so.")
-        response = await self.client.chat.completions.create(model=self.config.llm_model, temperature=0, messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"Question: {question}\n\nEvidence:\n{context}"}])
-        return {"answer": response.choices[0].message.content or "", "language": lang, "source_mode": source_mode, "sources": [{"title": h.metadata.get("title", ""), "source": h.metadata.get("source", ""), "kind": h.metadata.get("kind", "")} for h in hits], "retrieval_ms": retrieved_ms, "total_ms": round((time.perf_counter() - start) * 1000)}
+            answer = "未找到足够可靠的资料来回答这个问题。" if lang == "zh" else "I couldn't find reliable information to answer that question."
+            source_mode = "none"
+        else:
+            answer = await self._generate(question, lang, hits)
+        return {"answer": answer, "language": lang, "source_mode": source_mode,
+                "sources": [{"title": h.metadata.get("title", ""), "source": h.metadata.get("source", ""), "kind": h.metadata.get("kind", "")} for h in hits],
+                "retrieval_ms": retrieved_ms, "route_reason": need.reason,
+                "total_ms": round((time.perf_counter() - start) * 1000)}
 
     async def transcribe(self, filename: str, data: bytes) -> str:
         if not self.config.openai_key:
