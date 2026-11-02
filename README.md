@@ -13,7 +13,7 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-编辑 `.env`，填入 `OPENAI_API_KEY`、`TAVILY_API_KEY` 和 Notion MCP 连接方式。**不要提交 `.env`**。云端模型可通过 `OPENAI_BASE_URL` 和模型名切换为兼容 OpenAI API 的服务，但语音转写接口、JSON 输出与 embedding 兼容性需实测。
+编辑 `.env`，填入 `AIROBOT_LLM_API_KEY`、`TAVILY_API_KEY` 和 Notion MCP 连接方式。**不要提交 `.env`**。默认使用阿里云 DashScope 北京兼容接口：`qwen3.7-max` 回答、`text-embedding-v4` 向量、`qwen3-asr-flash` 音频转写。用户最初指定的 `qwen3-max` 在当前密钥和地址下返回 `model_not_found`，因此采用已验证可调用的 `qwen3.7-max`。`AIROBOT_LLM_BASE_URL` 可改为同一账号对应区域的地址。切换 embedding 模型后必须重新建索引。音频文件最大 7 MB，以保证 Base64 请求低于模型 10 MB 上限；支持 mp3、wav、webm、ogg。
 
 Notion MCP 可以使用 Streamable HTTP (`NOTION_MCP_URL`，可选 Bearer `NOTION_MCP_TOKEN`) 或本地 stdio (`NOTION_MCP_COMMAND` 与 JSON 数组 `NOTION_MCP_ARGS`)。当前运行环境没有暴露 Notion MCP 工具，因此无法预设真实工具名和参数。连接后运行：
 

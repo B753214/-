@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import re
 import time
@@ -133,7 +134,10 @@ class Engine:
             raise RuntimeError("请在 .env 设置 OPENAI_API_KEY")
         if not data or len(data) > self.config.max_audio_mb * 1024 * 1024:
             raise ValueError(f"音频不能为空且不能超过 {self.config.max_audio_mb} MB")
-        if not re.search(r"\.(mp3|mp4|mpeg|mpga|m4a|wav|webm|ogg)$", filename, re.I):
-            raise ValueError("请上传 mp3、m4a、wav、webm 或 ogg 音频")
-        result = await self.client.audio.transcriptions.create(model=self.config.transcribe_model, file=(Path(filename).name, data))
-        return result.text.strip()
+        suffix = Path(filename).suffix.lower()
+        mime = {".mp3": "audio/mpeg", ".mpeg": "audio/mpeg", ".wav": "audio/wav", ".webm": "audio/webm", ".ogg": "audio/ogg"}.get(suffix)
+        if not mime:
+            raise ValueError("请上传 mp3、wav、webm 或 ogg 音频")
+        uri = f"data:{mime};base64,{base64.b64encode(data).decode()}"
+        result = await self.client.chat.completions.create(model=self.config.transcribe_model, messages=[{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": uri}}]}], extra_body={"asr_options": {"enable_itn": False}})
+        return (result.choices[0].message.content or "").strip()

@@ -14,11 +14,11 @@ def enabled(key: str, default: bool = True) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
-    openai_key: str = os.getenv("OPENAI_API_KEY", "")
-    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "")
-    llm_model: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    embed_model: str = os.getenv("EMBED_MODEL", "text-embedding-3-small")
-    transcribe_model: str = os.getenv("TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
+    openai_key: str = os.getenv("AIROBOT_LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+    openai_base_url: str = os.getenv("AIROBOT_LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    llm_model: str = os.getenv("AIROBOT_LLM_MODEL") or os.getenv("LLM_MODEL", "qwen3.7-max")
+    embed_model: str = os.getenv("EMBED_MODEL", "text-embedding-v4")
+    transcribe_model: str = os.getenv("TRANSCRIBE_MODEL", "qwen3-asr-flash")
     tavily_key: str = os.getenv("TAVILY_API_KEY", "")
     notion_url: str = os.getenv("NOTION_MCP_URL", "")
     notion_token: str = os.getenv("NOTION_MCP_TOKEN", "")
@@ -35,6 +35,6 @@ class Settings:
     fusion_top_k: int = int(os.getenv("FUSION_TOP_K", "10"))
     rerank_top_k: int = int(os.getenv("RERANK_TOP_K", "4"))
     relevance_threshold: float = float(os.getenv("RELEVANCE_THRESHOLD", "0.70"))
-    max_audio_mb: int = int(os.getenv("MAX_AUDIO_MB", "20"))
+    max_audio_mb: int = int(os.getenv("MAX_AUDIO_MB", "7"))
     index_dir: Path = ROOT / "data" / "index"
     pdf_dir: Path = ROOT / "data" / "pdfs"
