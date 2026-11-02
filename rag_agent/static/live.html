@@ -24,13 +24,14 @@
           <button id="export" disabled>导出记录</button>
         </div>
         <label class="switch-row" for="ai-switch"><span><strong>AI 回答</strong><small>关闭时只记录；开启后只回答新听到的面试官问题</small></span><input id="ai-switch" type="checkbox" disabled><span class="switch" aria-hidden="true"></span></label>
+        <label class="switch-row bleed-row" for="bleed-switch"><span><strong>防串音</strong><small>面试官说话时暂停麦克风转写；双方同时说话时可能漏掉你的声音</small></span><input id="bleed-switch" type="checkbox" checked><span class="switch" aria-hidden="true"></span></label>
         <div id="status" class="status" role="status">点击“开始会话”，共享会议音频并允许麦克风。使用桌面版 Chrome 或 Edge。</div>
         <div class="previews"><div><b>面试官 · 电脑声音</b><p id="interviewer-preview">等待语音…</p></div><div><b>我 · 麦克风</b><p id="me-preview">等待语音…</p></div></div>
         <div class="log-header"><h2>本次记录</h2><span id="count">0 条</span></div>
         <div id="log" class="log" aria-live="polite"><p class="empty">会话记录会显示在这里。</p></div>
       </section>
     </div>
-    <p class="note">请选择会议窗口或整个屏幕，并在共享对话框中勾选音频。浏览器只将文字保存在当前标签页的会话中；新会话会覆盖旧记录。</p>
+    <p class="note">优先使用耳机，避免扬声器声音进入麦克风。请选择会议窗口或整个屏幕，并在共享对话框中勾选音频。浏览器只将文字保存在当前标签页的会话中；新会话会覆盖旧记录。</p>
   </main>
 </body>
 </html>

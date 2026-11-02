@@ -1,4 +1,4 @@
-const ui = Object.fromEntries(['live-panel','panel-mount','start','end','float','export','ai-switch','session-state','status','interviewer-preview','me-preview','count','log'].map(id => [id, document.getElementById(id)]));
+const ui = Object.fromEntries(['live-panel','panel-mount','start','end','float','export','ai-switch','bleed-switch','session-state','status','interviewer-preview','me-preview','count','log'].map(id => [id, document.getElementById(id)]));
 const storeKey = 'atlas-live-session';
 let session = { startedAt: null, endedAt: null, entries: [] };
 try { session = JSON.parse(sessionStorage.getItem(storeKey)) || session; } catch {}
@@ -6,6 +6,7 @@ if (session.startedAt && !session.endedAt) session.endedAt = new Date().toISOStr
 let displayStream, microphoneStream, audioContext, audioNodes = [], sockets = {};
 let running = false, starting = false, stopping = false, aiSince = 0, aiEpoch = 0;
 let interviewerStartedAt = 0, interviewerBuffer = [], questionJobs = Promise.resolve(), answerJobs = Promise.resolve(), activeAnswerController;
+let lastPlaybackAt = 0;
 let pipWindow = null;
 
 const clock = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -158,7 +159,11 @@ const processorCode = `class PcmProcessor extends AudioWorkletProcessor {
       this.pending.push(value<0?value*32768:value*32767);
     }
     this.input.splice(0,Math.floor(count*ratio));
-    while(this.pending.length>=3200){const pcm=new Int16Array(this.pending.splice(0,3200));this.port.postMessage(pcm.buffer,[pcm.buffer]);}
+    while(this.pending.length>=3200){
+      const pcm=new Int16Array(this.pending.splice(0,3200));
+      let power=0;for(const sample of pcm)power+=sample*sample;
+      this.port.postMessage({buffer:pcm.buffer,rms:Math.sqrt(power/pcm.length)/32768},[pcm.buffer]);
+    }
     return true;
   }
 } registerProcessor('pcm-processor',PcmProcessor);`;
@@ -170,7 +175,10 @@ async function connectAudio(role, stream) {
   source.connect(processor).connect(silent).connect(audioContext.destination);
   processor.port.onmessage = message => {
     const socket = sockets[role];
-    if (socket?.readyState === WebSocket.OPEN && socket.bufferedAmount < 256000) socket.send(message.data);
+    if (role === 'interviewer' && message.data.rms > 0.006) lastPlaybackAt = Date.now();
+    if (socket?.readyState !== WebSocket.OPEN || socket.bufferedAmount >= 256000) return;
+    const crosstalk = role === 'me' && ui['bleed-switch'].checked && Date.now() - lastPlaybackAt < 250;
+    socket.send(crosstalk ? new Int16Array(message.data.buffer.byteLength / 2).buffer : message.data.buffer);
   };
   audioNodes.push(source, processor, silent);
 }
@@ -195,10 +203,15 @@ async function startSession() {
     if (!displayStream.getAudioTracks().length) throw Error('未取得会议播放音轨。请重新选择会议窗口或屏幕，并勾选共享音频。');
     status('请允许访问麦克风…');
     microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    const micTrack = microphoneStream.getAudioTracks()[0];
+    const cancellation = micTrack.getCapabilities?.().echoCancellation;
+    if (Array.isArray(cancellation) && cancellation.includes('all')) {
+      try { await micTrack.applyConstraints({ echoCancellation: 'all', noiseSuppression: true }); } catch {}
+    }
     session = { startedAt: new Date().toISOString(), endedAt: null, entries: [] };
     persist(); renderLog(); interviewerBuffer = []; aiSince = 0; aiEpoch++;
     ui['ai-switch'].checked = false;
-    interviewerStartedAt = Date.now();
+    interviewerStartedAt = Date.now(); lastPlaybackAt = 0;
     status('正在连接两路实时语音识别…');
     await Promise.all([openAsr('interviewer'), openAsr('me')]);
     audioContext = new AudioContext();
@@ -209,7 +222,7 @@ async function startSession() {
     await audioContext.resume();
     displayStream.getVideoTracks().forEach(track => { track.onended = () => { if (running) endSession(); }; });
     running = true; starting = false; buttons();
-    status('正在记录双方语音。AI 回答默认关闭。');
+    status(`正在记录双方语音。麦克风：${micTrack.label || '默认设备'}。AI 回答默认关闭。`);
   } catch (error) {
     await releaseAudio();
     for (const socket of Object.values(sockets)) socket.close(); sockets = {};
