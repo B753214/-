@@ -13,7 +13,7 @@ from openai import AsyncOpenAI
 from rank_bm25 import BM25Okapi
 from .config import Settings
 from .notion import page_title, read_pages
-from .retrieval import Hit, fuse_rrf, language_of, relevant, tokens
+from .retrieval import Hit, conversational_answer, fuse_rrf, language_of, relevant, tokens
 
 
 class Engine:
@@ -107,22 +107,27 @@ class Engine:
         question = question.strip()
         if not question or len(question) > 4000:
             raise ValueError("问题长度需为 1 至 4000 字")
-        if not self.config.openai_key:
-            raise RuntimeError("请在 .env 设置 OPENAI_API_KEY")
         start = time.perf_counter()
         lang = language_of(question)
+        direct = conversational_answer(question)
+        if direct is not None:
+            return {"answer": direct, "language": lang, "source_mode": "conversation", "sources": [], "retrieval_ms": 0,
+                    "total_ms": round((time.perf_counter() - start) * 1000)}
+        if not self.config.openai_key:
+            raise RuntimeError("请在 .env 设置 OPENAI_API_KEY")
         hits, vector_score = await self._retrieve(question)
         retrieved_ms = round((time.perf_counter() - start) * 1000)
         hits, quality = await self._rank(question, hits, vector_score)
         source_mode = "knowledge_base"
         if not relevant(quality, self.config.relevance_threshold):
-            if self.config.web_fallback_enabled:
+            if self.config.web_fallback_enabled and self.config.tavily_key:
                 hits = await self._web(question)
                 source_mode = "web"
             else:
                 hits = []
+                source_mode = "none"
         if not hits:
-            return {"answer": "未找到足够可靠的资料来回答这个问题。" if lang == "zh" else "I couldn't find reliable information to answer that question.", "language": lang, "source_mode": source_mode, "sources": [], "retrieval_ms": retrieved_ms}
+            return {"answer": "未找到足够可靠的资料来回答这个问题。" if lang == "zh" else "I couldn't find reliable information to answer that question.", "language": lang, "source_mode": source_mode, "sources": [], "retrieval_ms": retrieved_ms, "total_ms": round((time.perf_counter() - start) * 1000)}
         context = "\n\n".join(f"[{i}] {h.metadata.get('title', '')} | {h.metadata.get('source', '')}\n{h.text[:1800]}" for i, h in enumerate(hits, 1))
         instruction = ("仅根据资料回答。中文问题用中文回答，英文问题用英文回答。引用资料时使用 [1] 这样的编号；资料不足就明确说明。"
                        if lang == "zh" else "Answer in English only, using the supplied evidence. Cite passages as [1], [2]. If evidence is insufficient, say so.")

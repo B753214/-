@@ -1,4 +1,9 @@
-from rag_agent.retrieval import Hit, fuse_rrf, language_of, relevant
+import asyncio
+from dataclasses import replace
+
+from rag_agent.config import Settings
+from rag_agent.engine import Engine
+from rag_agent.retrieval import Hit, conversational_answer, fuse_rrf, language_of, relevant
 
 
 def test_language_tracks_question():
@@ -21,3 +26,27 @@ def test_quality_uses_grader_not_rrf():
     assert relevant(0.8, 0.55)
     assert not relevant(0.3, 0.55)
     assert not relevant(None, 0.55)
+
+
+def test_identity_question_skips_retrieval_and_web():
+    engine = Engine(replace(Settings(), openai_key="", tavily_key=""))
+    result = asyncio.run(engine.ask("你是谁？"))
+    assert result["source_mode"] == "conversation"
+    assert result["retrieval_ms"] == 0
+    assert result["sources"] == []
+    assert "Atlas" in result["answer"]
+    assert conversational_answer("Who are you?").startswith("I'm Atlas")
+    assert conversational_answer("Webpack 的 HMR 是什么？") is None
+
+
+def test_low_relevance_without_web_key_returns_no_evidence():
+    engine = Engine(replace(Settings(), openai_key="test", tavily_key="", web_fallback_enabled=True))
+
+    async def no_hits(_):
+        return [], 0.0
+
+    engine._retrieve = no_hits
+    result = asyncio.run(engine.ask("知识库里没有的内容是什么？"))
+    assert result["source_mode"] == "none"
+    assert result["sources"] == []
+    assert "未找到" in result["answer"]
