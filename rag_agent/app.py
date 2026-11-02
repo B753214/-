@@ -2,11 +2,13 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from openai import APIConnectionError, APITimeoutError
 from pydantic import BaseModel, Field
 from .engine import Engine
+from .live_audio import relay_audio
 
 engine = Engine()
 
@@ -21,15 +23,25 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Bilingual RAG Agent", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 class Question(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
 
 
+class InterviewSpeech(BaseModel):
+    text: str = Field(min_length=1, max_length=1200)
+
+
 @app.get("/")
 async def home():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
+
+
+@app.get("/live")
+async def live_page():
+    return FileResponse(Path(__file__).parent / "static" / "live.html")
 
 
 @app.get("/health")
@@ -47,6 +59,22 @@ async def ask(payload: Question):
         raise HTTPException(503, str(exc)) from exc
     except (APITimeoutError, APIConnectionError) as exc:
         raise HTTPException(503, "云端模型暂时无响应，请稍后重试") from exc
+
+
+@app.websocket("/api/live/asr/{role}")
+async def live_asr(socket: WebSocket, role: str):
+    if role not in {"interviewer", "me"}:
+        await socket.close(code=1008)
+        return
+    await relay_audio(socket, engine.config)
+
+
+@app.post("/api/live/question")
+async def live_question(payload: InterviewSpeech):
+    try:
+        return {"question": await engine.interview_question(payload.text)}
+    except (APITimeoutError, APIConnectionError) as exc:
+        raise HTTPException(503, "问题判断暂时无响应") from exc
 
 
 @app.post("/api/ask/stream")

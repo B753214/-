@@ -13,3 +13,4 @@ rank-bm25>=0.2.2,<1
 jieba>=0.42,<1
 tavily-python>=0.5,<1
 pytest>=8,<10
+websockets>=13,<18

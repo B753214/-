@@ -21,6 +21,8 @@ class Settings:
     rerank_model: str = os.getenv("AIROBOT_RERANK_MODEL") or os.getenv("RERANK_MODEL", "qwen3.7-flash")
     embed_model: str = os.getenv("EMBED_MODEL", "text-embedding-v4")
     transcribe_model: str = os.getenv("TRANSCRIBE_MODEL", "qwen3-asr-flash")
+    live_asr_model: str = os.getenv("LIVE_ASR_MODEL", "qwen3-asr-flash-realtime")
+    live_asr_ws_url: str = os.getenv("LIVE_ASR_WS_URL", "wss://dashscope.aliyuncs.com/api-ws/v1/realtime")
     tavily_key: str = os.getenv("TAVILY_API_KEY", "")
     notion_url: str = os.getenv("NOTION_MCP_URL", "")
     notion_token: str = os.getenv("NOTION_MCP_TOKEN", "")

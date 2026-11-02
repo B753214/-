@@ -41,6 +41,14 @@ uvicorn rag_agent.app:app --host 127.0.0.1 --port 8000
 
 打开 <http://127.0.0.1:8000/>。首次 Notion 导入会触发浏览器授权，请选择能够读取目标页面的工作区。`GET /health` 中 `ready: true` 表示索引已加载。
 
+### 通话模式
+
+在桌面版 Chrome 或 Edge 打开问答页，点击“通话模式”，或直接打开 <http://127.0.0.1:8000/live>。点击“开始会话”后，选择外部会议窗口或整个屏幕，并在浏览器共享对话框中勾选音频，再允许麦克风。页面分别标记“面试官 · 电脑声音”和“我 · 麦克风”。若所选共享来源没有音轨，会提示重新选择；浏览器对系统音频的支持取决于浏览器、操作系统和共享来源。
+
+“AI 回答”默认关闭，此时只转写。开启后，仅对开启之后开始说出的面试官问题生成文字答案；你的麦克风内容不会触发回答。回答沿用现有问答路由和知识库检索。点击“悬浮小窗”可在支持 Document Picture-in-Picture 的浏览器中打开置顶窗口，用户可拖动及调整大小；主标签页需保持打开。结束后点击“导出记录”下载 Markdown，包含双方转写、AI 答案和来源。记录只保留在当前标签页的 `sessionStorage`；关闭标签页后清除，开始新会话会覆盖旧记录。应用不保存音频文件。
+
+实时识别使用两路 `qwen3-asr-flash-realtime` WebSocket，会产生语音模型用量。可通过 `LIVE_ASR_WS_URL` 指向所在业务空间的实时 WebSocket 地址，`LIVE_ASR_MODEL` 设置模型名。密钥仍只保存在服务端 `.env`，不会发送给浏览器。建议使用耳机，避免会议播放声音被麦克风再次采入。
+
 **启动服务只加载已有索引，不会重新读取文档。** Notion 或 PDF 内容变更后，再运行 `python -m rag_agent.ingest`，随后重启服务。目前每次导入都会全量重建索引。
 
 ## 添加知识库文档
@@ -78,10 +86,11 @@ agent/
 │  ├─ config.py          # 读取 .env 和默认配置
 │  ├─ engine.py          # 文档切块、建索引、检索、回答和音频转写
 │  ├─ ingest.py          # 手动执行全量导入的入口
+│  ├─ live_audio.py      # 两路实时语音识别的 WebSocket 桥接
 │  ├─ notion.py          # Notion MCP 读取及子页面遍历
 │  ├─ retrieval.py       # 分词、RRF、语言和相关性判断
 │  ├─ tools.py           # 查看当前 Notion MCP 读取工具
-│  └─ static/index.html  # 问答页
+│  └─ static/            # 问答页和通话悬浮窗界面
 ├─ data/
 │  ├─ pdfs/             # 待导入的 PDF
 │  └─ index/            # 生成的本地索引
@@ -105,6 +114,7 @@ agent/
 | `VECTOR_TOP_K` / `BM25_TOP_K` / `FUSION_TOP_K` / `RERANK_TOP_K` | 各阶段候选数量 | `8` / `8` / `10` / `4` |
 | `RELEVANCE_THRESHOLD` | 内部文档检索的可靠性阈值 | `0.70` |
 | `MAX_AUDIO_MB` | 单个音频文件大小上限 | `7` |
+| `LIVE_ASR_MODEL` / `LIVE_ASR_WS_URL` | 通话模式的实时识别模型和 WebSocket 地址 | 见 `.env.example` |
 
 默认开启快速模型重排，以避免向量相似度低估正确文档。知识库检索结果低于 `RELEVANCE_THRESHOLD` 时，如已启用网络搜索并配置 `TAVILY_API_KEY`，会继续搜索网页；否则明确说明搜索不可用，不会猜测答案。`WEB_FALLBACK_ENABLED=false` 可关闭网络搜索。相关性阈值应结合实际问题校准，开启重排前后评分含义不同。路由对明确线索使用快速规则，对模糊问题调用一次模型判断是否需要查资料，因此可能增加少量延迟。索引构建、问题向量化、重排和回答会产生云端 API 用量。
 
@@ -117,6 +127,9 @@ agent/
 | `POST /api/ask` | JSON `{"question":"..."}`；返回文字答案、语言、路由原因、来源和耗时 |
 | `POST /api/ask/stream` | JSON `{"question":"..."}`；逐行 NDJSON 返回答案片段和最终来源、耗时 |
 | `POST /api/transcribe` | multipart `audio`；返回转写文字，确认后可作为问题发送 |
+| `GET /live` | 通话模式页面 |
+| `WS /api/live/asr/{role}` | `role` 为 `me` 或 `interviewer`；输入 PCM16/16kHz 音频块，输出实时转写事件 |
+| `POST /api/live/question` | 判断面试官发言是否为问题；仅 AI 开关打开后调用 |
 
 音频支持 mp3、wav、webm、ogg，输出始终为文字。运行测试：
 
