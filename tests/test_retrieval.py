@@ -62,7 +62,7 @@ def test_low_relevance_with_web_key_falls_back_to_web():
     async def web_hits(_):
         return [Hit("https://example.com", "Evidence", {"title": "Web", "source": "https://example.com", "kind": "web"})]
 
-    async def answer(*_):
+    async def answer(*_, **__):
         return "来自网络的答案 [1]"
 
     engine._retrieve = no_hits

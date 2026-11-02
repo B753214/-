@@ -34,7 +34,9 @@ def test_stable_concept_uses_model_without_retrieval():
     result = asyncio.run(engine.ask("HMR 的原理是什么？"))
     assert result["source_mode"] == "model"
     assert result["retrieval_ms"] == 0
+    assert result["route_ms"] >= 0
     assert result["sources"] == []
+    assert engine._chat_extra("qwen3.7-max") == {"enable_thinking": False}
 
 
 def test_current_fact_without_web_key_is_not_guessed():

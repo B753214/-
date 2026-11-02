@@ -30,7 +30,7 @@ AIROBOT_LLM_API_KEY=你的DashScope密钥
 NOTION_PAGE_IDS=24fa020ef1cf80b68685fcfade70e314
 ```
 
-如果只用 PDF，可将 `NOTION_PAGE_IDS` 留空。默认模型为 `qwen3.7-max`、`text-embedding-v4` 和 `qwen3-asr-flash`。默认地址是 DashScope 北京兼容接口；使用其他区域或兼容服务时，调整 `.env` 中的模型和地址。切换 embedding 模型后必须重新建索引。
+如果只用 PDF，可将 `NOTION_PAGE_IDS` 留空。默认回答模型为 `qwen3.7-max`，路由和重排模型为 `qwen3.7-flash`，向量模型为 `text-embedding-v4`，音频模型为 `qwen3-asr-flash`。DashScope 的 Qwen3 文本调用默认关闭思考模式以缩短等待时间；其他兼容服务不额外传此参数。问答页使用流式回答，长答案会逐步显示；模型请求 30 秒超时，页面会显示超时提示。默认地址是 DashScope 北京兼容接口；使用其他区域或兼容服务时，调整 `.env` 中的模型和地址。切换 embedding 模型后必须重新建索引。
 
 先导入文档，再启动问答服务：
 
@@ -97,16 +97,16 @@ agent/
 | --- | --- | --- |
 | `AIROBOT_LLM_API_KEY` | 云端模型密钥 | 必填 |
 | `AIROBOT_LLM_BASE_URL` | OpenAI 兼容接口地址 | DashScope 北京地址 |
-| `AIROBOT_LLM_MODEL` / `EMBED_MODEL` / `TRANSCRIBE_MODEL` | 回答、向量和音频模型 | 见 `.env.example` |
+| `AIROBOT_LLM_MODEL` / `AIROBOT_ROUTER_MODEL` / `EMBED_MODEL` / `TRANSCRIBE_MODEL` | 回答、路由、向量和音频模型 | 见 `.env.example` |
 | `NOTION_PAGE_IDS` | Notion 入口页面 ID，多个用逗号分隔 | Webpack 示例页 |
 | `NOTION_INCLUDE_SUBPAGES` / `NOTION_MAX_PAGES` | 是否遍历子页面及页面数上限 | `true` / `1000` |
-| `BM25_ENABLED` / `RERANK_ENABLED` | 关键词召回和云端重排 | `true` / `false` |
+| `BM25_ENABLED` / `RERANK_ENABLED` | 关键词召回和云端重排 | `true` / `true` |
 | `WEB_FALLBACK_ENABLED` / `TAVILY_API_KEY` | 是否允许网络搜索及网页提取 | `true` / 空 |
 | `VECTOR_TOP_K` / `BM25_TOP_K` / `FUSION_TOP_K` / `RERANK_TOP_K` | 各阶段候选数量 | `8` / `8` / `10` / `4` |
 | `RELEVANCE_THRESHOLD` | 内部文档检索的可靠性阈值 | `0.70` |
 | `MAX_AUDIO_MB` | 单个音频文件大小上限 | `7` |
 
-默认关闭重排以减少延迟。知识库检索结果低于 `RELEVANCE_THRESHOLD` 时，如已启用网络搜索并配置 `TAVILY_API_KEY`，会继续搜索网页；否则明确说明搜索不可用，不会猜测答案。`WEB_FALLBACK_ENABLED=false` 可关闭网络搜索。相关性阈值应结合实际问题校准，开启重排前后评分含义不同。路由对明确线索使用快速规则，对模糊问题调用一次模型判断是否需要查资料，因此可能增加少量延迟。索引构建、问题向量化、重排和回答会产生云端 API 用量。
+默认开启快速模型重排，以避免向量相似度低估正确文档。知识库检索结果低于 `RELEVANCE_THRESHOLD` 时，如已启用网络搜索并配置 `TAVILY_API_KEY`，会继续搜索网页；否则明确说明搜索不可用，不会猜测答案。`WEB_FALLBACK_ENABLED=false` 可关闭网络搜索。相关性阈值应结合实际问题校准，开启重排前后评分含义不同。路由对明确线索使用快速规则，对模糊问题调用一次模型判断是否需要查资料，因此可能增加少量延迟。索引构建、问题向量化、重排和回答会产生云端 API 用量。
 
 ## 接口与测试
 
@@ -115,6 +115,7 @@ agent/
 | `GET /` | 问答页 |
 | `GET /health` | 索引就绪状态、分块数及检索开关 |
 | `POST /api/ask` | JSON `{"question":"..."}`；返回文字答案、语言、路由原因、来源和耗时 |
+| `POST /api/ask/stream` | JSON `{"question":"..."}`；逐行 NDJSON 返回答案片段和最终来源、耗时 |
 | `POST /api/transcribe` | multipart `audio`；返回转写文字，确认后可作为问题发送 |
 
 音频支持 mp3、wav、webm、ogg，输出始终为文字。运行测试：

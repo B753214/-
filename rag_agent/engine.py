@@ -5,6 +5,7 @@ import re
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Awaitable, Callable
 from urllib.parse import urlparse
 
 import pymupdf
@@ -25,10 +26,16 @@ class Engine:
         self.index = None
         self.nodes = []
         self.bm25 = None
-        self.client = AsyncOpenAI(api_key=self.config.openai_key or "unset", base_url=self.config.openai_base_url or None)
+        self.client = AsyncOpenAI(api_key=self.config.openai_key or "unset", base_url=self.config.openai_base_url or None,
+                                  timeout=30.0, max_retries=0)
 
     def _embed(self):
         return OpenAIEmbedding(model_name=self.config.embed_model, embed_batch_size=10, api_key=self.config.openai_key, api_base=self.config.openai_base_url or None)
+
+    def _chat_extra(self, model: str) -> dict:
+        if "dashscope.aliyuncs.com" in self.config.openai_base_url and model.startswith("qwen3"):
+            return {"enable_thinking": False}
+        return {}
 
     def load(self) -> bool:
         if not (self.config.index_dir / "docstore.json").exists():
@@ -91,7 +98,9 @@ class Engine:
         prompt = ("Rate whether each passage contains evidence to answer the question. Return JSON only: "
                   "{\"scores\": [numbers between 0 and 1 in candidate order]}. Do not reward keyword overlap without answer evidence.\n"
                   f"Question: {question}\nCandidates: {json.dumps(candidates, ensure_ascii=False)}")
-        response = await self.client.chat.completions.create(model=self.config.llm_model, temperature=0, response_format={"type": "json_object"}, messages=[{"role": "user", "content": prompt}])
+        response = await self.client.chat.completions.create(model=self.config.router_model, temperature=0,
+            extra_body=self._chat_extra(self.config.router_model), response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}])
         scores = json.loads(response.choices[0].message.content or "{}").get("scores", [])
         if not isinstance(scores, list) or len(scores) != len(hits):
             raise RuntimeError("重排服务未返回有效分数")
@@ -105,8 +114,9 @@ class Engine:
         prompt = ("Generate 2 or 3 distinct, focused web search queries for this comparison or research question. "
                   "Return JSON only: {\"queries\":[\"...\"]}. Keep the question's language and do not add private information.\n"
                   f"Question: {question}")
-        response = await self.client.chat.completions.create(model=self.config.llm_model, temperature=0,
-            response_format={"type": "json_object"}, messages=[{"role": "user", "content": prompt}])
+        response = await self.client.chat.completions.create(model=self.config.router_model, temperature=0,
+            extra_body=self._chat_extra(self.config.router_model), response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}])
         try:
             queries = json.loads(response.choices[0].message.content or "{}").get("queries", [])
         except ValueError:
@@ -149,15 +159,17 @@ class Engine:
                   "user-specific data, and supplied URLs. Do not search for stable math, algorithms, protocols, or mature concepts. "
                   "When uncertain about a fact, choose search. Return JSON only, such as {\"search\":true} or {\"search\":false}.\n"
                   f"Question: {question}")
-        response = await self.client.chat.completions.create(model=self.config.llm_model, temperature=0,
-            response_format={"type": "json_object"}, messages=[{"role": "user", "content": prompt}])
+        response = await self.client.chat.completions.create(model=self.config.router_model, temperature=0,
+            extra_body=self._chat_extra(self.config.router_model), response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}])
         try:
             decision = json.loads(response.choices[0].message.content or "{}").get("search")
         except ValueError:
             decision = None
         return NeedDecision(decision is not False, "uncertain" if decision is not False else "stable_concept")
 
-    async def _generate(self, question: str, lang: str, hits: list[Hit] | None = None) -> str:
+    async def _generate(self, question: str, lang: str, hits: list[Hit] | None = None,
+                        on_token: Callable[[str], Awaitable[None]] | None = None) -> str:
         if hits is None:
             instruction = ("用中文回答。只回答稳定的通用知识；如果问题依赖最新信息、个人资料或你没有把握，明确说明需要核实，不要编造。"
                            if lang == "zh" else "Answer in English. Answer stable general knowledge only. If current or private facts are needed, say they need verification; do not guess.")
@@ -167,11 +179,22 @@ class Engine:
             instruction = ("仅根据资料回答。中文问题用中文回答，英文问题用英文回答。引用资料时使用 [1] 这样的编号；资料不足就明确说明。"
                            if lang == "zh" else "Answer in English only, using the supplied evidence. Cite passages as [1], [2]. If evidence is insufficient, say so.")
             user_content = f"Question: {question}\n\nEvidence:\n{context}"
-        response = await self.client.chat.completions.create(model=self.config.llm_model, temperature=0,
-            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": user_content}])
-        return response.choices[0].message.content or ""
+        params = {"model": self.config.llm_model, "temperature": 0,
+                  "extra_body": self._chat_extra(self.config.llm_model),
+                  "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": user_content}]}
+        if on_token is None:
+            response = await self.client.chat.completions.create(**params)
+            return response.choices[0].message.content or ""
+        stream = await self.client.chat.completions.create(**params, stream=True)
+        parts = []
+        async for chunk in stream:
+            token = chunk.choices[0].delta.content if chunk.choices else None
+            if token:
+                parts.append(token)
+                await on_token(token)
+        return "".join(parts)
 
-    async def ask(self, question: str) -> dict:
+    async def ask(self, question: str, on_token: Callable[[str], Awaitable[None]] | None = None) -> dict:
         question = question.strip()
         if not question or len(question) > 4000:
             raise ValueError("问题长度需为 1 至 4000 字")
@@ -180,14 +203,16 @@ class Engine:
         direct = conversational_answer(question)
         if direct is not None:
             return {"answer": direct, "language": lang, "source_mode": "conversation", "sources": [], "retrieval_ms": 0,
-                    "total_ms": round((time.perf_counter() - start) * 1000)}
+                    "route_ms": 0, "total_ms": round((time.perf_counter() - start) * 1000)}
         if not self.config.openai_key:
             raise RuntimeError("请在 .env 设置 OPENAI_API_KEY")
         need = await self._decide_need(question)
+        route_ms = round((time.perf_counter() - start) * 1000)
         if not need.search:
-            answer = await self._generate(question, lang)
+            answer = await self._generate(question, lang, on_token=on_token)
             return {"answer": answer, "language": lang, "source_mode": "model", "sources": [], "retrieval_ms": 0,
-                    "route_reason": need.reason, "total_ms": round((time.perf_counter() - start) * 1000)}
+                    "route_reason": need.reason, "route_ms": route_ms,
+                    "total_ms": round((time.perf_counter() - start) * 1000)}
 
         source_mode, url = source_for(question, need.reason)
         retrieval_start = time.perf_counter()
@@ -203,7 +228,7 @@ class Engine:
                               else "The knowledge base did not provide reliable evidence, and web search is not configured.")
                     return {"answer": answer, "language": lang, "source_mode": "unavailable", "sources": [],
                             "retrieval_ms": round((time.perf_counter() - retrieval_start) * 1000),
-                            "route_reason": "knowledge_base_low_quality",
+                            "route_reason": "knowledge_base_low_quality", "route_ms": route_ms,
                             "total_ms": round((time.perf_counter() - start) * 1000)}
                 else:
                     hits = []
@@ -220,7 +245,8 @@ class Engine:
             answer = ("这个问题需要查证外部资料，但当前未配置可用的网络搜索。" if lang == "zh"
                       else "This question needs external verification, but web search is not configured.")
             return {"answer": answer, "language": lang, "source_mode": "unavailable", "sources": [], "retrieval_ms": 0,
-                    "route_reason": need.reason, "total_ms": round((time.perf_counter() - start) * 1000)}
+                    "route_reason": need.reason, "route_ms": route_ms,
+                    "total_ms": round((time.perf_counter() - start) * 1000)}
         elif source_mode == "web_url":
             hits = await self._extract_url(url or "", question)
         else:
@@ -230,10 +256,10 @@ class Engine:
             answer = "未找到足够可靠的资料来回答这个问题。" if lang == "zh" else "I couldn't find reliable information to answer that question."
             source_mode = "none"
         else:
-            answer = await self._generate(question, lang, hits)
+            answer = await self._generate(question, lang, hits, on_token=on_token)
         return {"answer": answer, "language": lang, "source_mode": source_mode,
                 "sources": [{"title": h.metadata.get("title", ""), "source": h.metadata.get("source", ""), "kind": h.metadata.get("kind", "")} for h in hits],
-                "retrieval_ms": retrieved_ms, "route_reason": need.reason,
+                "retrieval_ms": retrieved_ms, "route_reason": need.reason, "route_ms": route_ms,
                 "total_ms": round((time.perf_counter() - start) * 1000)}
 
     async def transcribe(self, filename: str, data: bytes) -> str:
