@@ -171,11 +171,14 @@ class Engine:
     async def interview_question(self, speech: str) -> str | None:
         """Extract an interview question without inventing missing speech."""
         prompt = (
-            "Determine whether this completed interviewer utterance asks the candidate to answer or explain something. "
-            "Imperatives such as 'describe', 'tell me about', '说说' and '介绍一下' count as questions. "
-            "Greetings, statements, filler and incomplete fragments do not. "
+            "This is a completed utterance from a technical interviewer. Decide if the candidate is expected to answer. "
+            "Explicit questions and requests such as 'describe', 'tell me about', '说说' and '介绍一下' count. "
+            "A standalone recognizable technical topic such as 'Webpack tree shaking' or 'MVCC' also counts as "
+            "an implicit request to explain that topic, even without a question mark. "
+            "Greetings, acknowledgements, ordinary statements and unfinished fragments such as '你能' do not count. "
             "Return JSON only: {\"is_question\":true,\"question\":\"...\"}. "
-            "Keep the original language and meaning; never add unheard words.\nSpeech: " + speech.strip()[:1200]
+            "For a topic phrase, turn it into a short 'Explain <topic>' question in the utterance's language. "
+            "Keep the original meaning; never add a new topic.\nSpeech: " + speech.strip()[:1200]
         )
         response = await self.client.chat.completions.create(
             model=self.config.router_model, temperature=0,
