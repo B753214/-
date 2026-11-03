@@ -55,7 +55,7 @@ uvicorn rag_agent.app:app --host 127.0.0.1 --port 8000
 
 实时识别使用两路 `qwen3-asr-flash-realtime` WebSocket，会产生语音模型用量。可通过 `LIVE_ASR_WS_URL` 指向所在业务空间的实时 WebSocket 地址，`LIVE_ASR_MODEL` 设置模型名。密钥仍只保存在服务端 `.env`，不会发送给浏览器。建议使用耳机：会议音频仍从共享来源的数字音轨采集，耳机能避免播放声音再次进入麦克风。页面默认开启“防串音”，面试官说话时会暂停麦克风转写；如果需要记录双方同时说话，请关闭该开关。浏览器也会尝试启用更强的麦克风回声消除，但效果取决于设备和浏览器。
 
-**启动服务只从磁盘加载已处理的分块、向量索引和 BM25 统计结果。** 启动时不会连接 Notion、解析 PDF、重新切分文档、重新生成 embedding 或重新为分块分词。问答时仍需调用云端模型生成问题向量、判断路由、可选重排和回答。Notion 或 PDF 内容变更后，运行 `python -m rag_agent.ingest` 全量重建，再重启服务加载新索引；仅修改 `.env` 不会自动更新文档。
+**启动服务只从磁盘加载已处理的分块、向量索引和 BM25 统计结果。** 启动时不会连接 Notion、解析 PDF、重新切分文档、重新生成 embedding 或重新为分块分词。问答时仍需调用云端模型生成问题向量、判断路由、可选重排和回答。新增或修改文档可使用下方的单来源增量命令；只有运行无参数的 `python -m rag_agent.ingest` 才会全量重建。导入后重启服务加载新索引；仅修改 `.env` 不会自动更新文档。
 
 ## 添加知识库文档
 
@@ -63,10 +63,22 @@ uvicorn rag_agent.app:app --host 127.0.0.1 --port 8000
 
 1. **上传 PDF**：把文件复制到项目根目录的 `data/pdfs/`。例如在 PowerShell 中运行 `Copy-Item "C:\路径\你的文档.pdf" .\data\pdfs\`。只扫描该目录下的 `.pdf` 文件，不扫描子目录；扫描版 PDF 需先做 OCR。
 2. **添加 Notion**：在项目根目录的 `.env` 中，把页面链接末尾的 32 位页面 ID 添加到 `NOTION_PAGE_IDS`，多个 ID 用英文逗号分隔。需要导入整个栏目时填父页面 ID，并保持 `NOTION_INCLUDE_SUBPAGES=true`；页面需属于已经授权的工作区。
-3. **处理并保存**：在项目根目录运行 `python -m rag_agent.ingest`。命令结束并显示 `documents`、`chunks` 后，处理结果已写入 `data/index/`。导入失败时先检查错误，不能只重启服务。
+3. **处理并保存**：在项目根目录运行下方对应的增量命令。命令结束并显示 `chunks_total` 后，结果已写入 `data/index/`。导入失败时先检查错误，不能只重启服务。
 4. **让问答生效**：首次导入后启动服务；运行中的服务则在导入完成后重启。打开 `/health` 检查 `ready: true` 和 `chunks` 数量。
 
-每次执行导入命令都会按当前 `.env` 中的 Notion 页面和 `data/pdfs/` 中的 PDF **全量重建**。新增、修改或删除文档后都要重新执行；网页问答和服务启动不会自动抓取新文档。若只需要把旧索引转换为新版 BM25 格式，使用下文的 `--prepare-existing-index`，它不读取源文档。
+新增或更新**一个 PDF**，只处理指定文件，不重新抓取 Notion、解析其他 PDF 或重新生成旧文档的向量：
+
+```powershell
+python -m rag_agent.ingest --pdf ".\data\pdfs\AI应用开发+后端面试题.pdf"
+```
+
+新增或更新**一个 Notion 页面树**，只抓取指定页面及其子页面；可传页面 ID 或完整链接。若它是新的根页面，也要把 ID 加到 `.env` 的 `NOTION_PAGE_IDS`，这样以后全量重建仍会包含它：
+
+```powershell
+python -m rag_agent.ingest --notion "https://app.notion.com/p/docker-3dea020ef1cf804f8caafa7a50f61d3e"
+```
+
+重复导入同一 PDF 会替换该 PDF 的旧分块；重复导入同一 Notion 页面会替换本次抓到的页面分块，不会重复追加。增量操作仍会根据现有分块刷新本地 BM25 文件，但只有指定来源会重新生成向量。删除源文件或删除 Notion 子页面后，需要运行无参数的 `python -m rag_agent.ingest` 全量重建，以清理已不在来源中的旧分块。网页问答和服务启动不会自动抓取新文档。
 
 在问题中明确写“我的知识库”“这份文档”“根据我的 Notion 文档”等，会选择本地知识库。普通稳定概念不会自动查知识库；若希望按内部文档回答，请在问题中点明文档或提供 Notion 页面链接。
 
@@ -106,7 +118,7 @@ agent/
 │  ├─ app.py             # FastAPI、问答页、健康检查和接口
 │  ├─ config.py          # 读取 .env 和默认配置
 │  ├─ engine.py          # 文档切块、建索引、检索、回答和音频转写
-│  ├─ ingest.py          # 离线全量导入及已有索引迁移入口
+│  ├─ ingest.py          # 单来源增量导入、全量重建及已有索引迁移
 │  ├─ bm25_store.py      # 离线 BM25 构建、保存和加载
 │  ├─ live_audio.py      # 两路实时语音识别的 WebSocket 桥接
 │  ├─ notion.py          # Notion MCP 读取及子页面遍历
@@ -162,7 +174,7 @@ python -m pytest -q
 ## 常见问题
 
 - **页面打开后提示没有索引**：先运行 `python -m rag_agent.ingest`，再启动服务。已有旧索引但缺少 BM25 文件时，运行 `python -m rag_agent.ingest --prepare-existing-index` 后重启。
-- **新增页面后仍检索不到**：确认页面属于已授权的工作区、`NOTION_PAGE_IDS` 已更新；重新导入并重启服务。
+- **新增页面后仍检索不到**：确认页面属于已授权的工作区、`NOTION_PAGE_IDS` 已更新；使用 `--notion` 导入该页面并重启服务。
 - **Notion 授权失败**：检查 Node.js 与 `npx`、工作区访问权限，以及 `.env` 中的 MCP 配置。可先运行 `python -m rag_agent.tools` 验证连接。
 - **扫描版 PDF 没有内容**：先用 OCR 生成可选中文字的 PDF。
 - **没有检索到可靠资料**：检查文档是否已导入，或在需要网络回退时设置 `TAVILY_API_KEY`。

@@ -59,19 +59,81 @@ class Engine:
         bm25_store.save(self.config.index_dir, nodes, bm25_store.build(nodes))
         return {"chunks": len(nodes), "bm25_file": str(self.config.index_dir / bm25_store.FILENAME)}
 
+    @staticmethod
+    def _pdf_documents(path: Path) -> list[Document]:
+        documents = []
+        with pymupdf.open(path) as pdf:
+            for number, page in enumerate(pdf, 1):
+                content = page.get_text().strip()
+                if content:
+                    documents.append(Document(text=content, id_=f"pdf:{path.name}:{number}",
+                        metadata={"title": path.name, "source": f"{path.name} · 第 {number} 页", "kind": "pdf", "page": number}))
+        return documents
+
+    @staticmethod
+    def _notion_documents(pages: list[tuple[str, str]]) -> list[Document]:
+        return [Document(text=text, id_=f"notion:{page_id}",
+            metadata={"title": page_title(text, page_id), "source": f"https://app.notion.com/p/{page_id}", "kind": "notion"})
+            for page_id, text in pages]
+
+    async def _upsert_documents(self, documents: list[Document], old_ref_ids: set[str]) -> dict:
+        if not self.config.openai_key:
+            raise RuntimeError("请在 .env 设置 AIROBOT_LLM_API_KEY")
+        if not documents:
+            raise RuntimeError("指定来源没有可提取的文字，索引未修改")
+        nodes = SentenceSplitter(chunk_size=512, chunk_overlap=80).get_nodes_from_documents(documents)
+        if self.index is None:
+            self.load()
+        if self.index is not None:
+            index = self.index
+            for ref_id in old_ref_ids:
+                index.delete_ref_doc(ref_id, delete_from_docstore=True)
+            await asyncio.to_thread(index.insert_nodes, nodes)
+        else:
+            index = await asyncio.to_thread(VectorStoreIndex, nodes, embed_model=self._embed(), show_progress=False)
+        self.config.index_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(index.storage_context.persist, persist_dir=str(self.config.index_dir))
+        stored_nodes = list(index.docstore.docs.values())
+        bm25 = await asyncio.to_thread(bm25_store.build, stored_nodes)
+        await asyncio.to_thread(bm25_store.save, self.config.index_dir, stored_nodes, bm25)
+        self.index, self.nodes, self.bm25 = index, stored_nodes, bm25 if self.config.bm25_enabled else None
+        return {"documents_processed": len(documents), "chunks_added": len(nodes),
+                "documents_replaced": len(old_ref_ids), "chunks_total": len(stored_nodes)}
+
+    async def upsert_pdf(self, path: Path) -> dict:
+        path = path.resolve()
+        if path.parent != self.config.pdf_dir.resolve() or path.suffix.lower() != ".pdf" or not path.is_file():
+            raise ValueError("请先将 PDF 放到 data/pdfs/，再传入该目录下的文件路径")
+        documents = await asyncio.to_thread(self._pdf_documents, path)
+        if self.load():
+            prefix = f"pdf:{path.name}:"
+            old_ref_ids = {node.ref_doc_id for node in self.nodes if node.ref_doc_id and node.ref_doc_id.startswith(prefix)}
+        else:
+            old_ref_ids = set()
+        return await self._upsert_documents(documents, old_ref_ids)
+
+    async def upsert_notion(self, page_or_url: str) -> dict:
+        match = PAGE_ID.search(page_or_url)
+        if not match:
+            raise ValueError("请提供有效的 Notion 页面 ID 或链接")
+        page_id = match.group().replace("-", "").lower()
+        pages = await read_pages(replace(self.config, notion_page_ids=(page_id,)))
+        documents = self._notion_documents(pages)
+        if self.load():
+            ids = {document.id_ for document in documents}
+            old_ref_ids = {node.ref_doc_id for node in self.nodes if node.ref_doc_id in ids}
+        else:
+            old_ref_ids = set()
+        return await self._upsert_documents(documents, old_ref_ids)
+
     async def rebuild(self) -> dict:
         if not self.config.openai_key:
             raise RuntimeError("请在 .env 设置 OPENAI_API_KEY")
         documents = []
         if self.config.notion_page_ids:
-            for page_id, text in await read_pages(self.config):
-                documents.append(Document(text=text, id_=f"notion:{page_id}", metadata={"title": page_title(text, page_id), "source": f"https://app.notion.com/p/{page_id}", "kind": "notion"}))
+            documents.extend(self._notion_documents(await read_pages(self.config)))
         for path in sorted(self.config.pdf_dir.glob("*.pdf")):
-            with pymupdf.open(path) as pdf:
-                for number, page in enumerate(pdf, 1):
-                    content = page.get_text().strip()
-                    if content:
-                        documents.append(Document(text=content, id_=f"pdf:{path.name}:{number}", metadata={"title": path.name, "source": f"{path.name} · 第 {number} 页", "kind": "pdf", "page": number}))
+            documents.extend(self._pdf_documents(path))
         if not documents:
             raise RuntimeError("没有可索引的文档；请配置 Notion MCP 或在 data/pdfs 放入可提取文字的 PDF")
         nodes = SentenceSplitter(chunk_size=512, chunk_overlap=80).get_nodes_from_documents(documents)
