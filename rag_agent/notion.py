@@ -119,7 +119,10 @@ async def _read(session, settings: Settings) -> list[tuple[str, str]]:
             raise RuntimeError(f"Notion 页面超过 NOTION_MAX_PAGES={settings.notion_max_pages}，已停止导入")
         visited.add(page_id)
         result = await session.call_tool(settings.notion_tool, {settings.notion_page_argument: page_id})
-        content = text_from_result(result)
+        try:
+            content = text_from_result(result)
+        except RuntimeError as exc:
+            raise RuntimeError(f"Notion 页面 {page_id} 读取失败；请检查该页面的授权或是否已删除") from exc
         if not content.strip():
             raise RuntimeError(f"Notion 页面 {page_id} 返回空内容")
         pages.append((page_id, content))
