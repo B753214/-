@@ -2,3 +2,4 @@
 .bleed-row{margin-top:9px}
 .manual-answer{margin-top:8px;padding:6px 10px;font-size:12px;color:#315cbd;border-color:#cad8f5}
 .ai-options{margin:-10px 0 8px}.ai-options summary{display:block;width:max-content;margin-left:auto;color:#91a0b4;font-size:12px;cursor:pointer;list-style:none}.ai-options summary::-webkit-details-marker{display:none}.ai-options summary:hover,.ai-options summary:focus-visible{color:#315cbd}.ai-options .switch-row{margin-top:9px}
+.answer-tag{display:inline-block;margin:0 0 8px;padding:3px 8px;border-radius:99px;background:#fff3dd;color:#9a5a00;font-size:11px;font-weight:700}

@@ -32,3 +32,5 @@ def test_question_classifier_uses_small_nonthinking_router():
     assert asyncio.run(engine.interview_question("Describe HMR.")) == "Describe HMR."
     assert calls[0]["model"] == "qwen-flash"
     assert calls[0]["extra_body"] == {"enable_thinking": False}
+    assert "ASR can mishear" in calls[0]["messages"][0]["content"]
+    assert "otherwise preserve" in calls[0]["messages"][0]["content"]

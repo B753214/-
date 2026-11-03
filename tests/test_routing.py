@@ -40,11 +40,18 @@ def test_stable_concept_uses_model_without_retrieval():
     assert engine._chat_extra("qwen-flash") == {"enable_thinking": False}
 
 
-def test_current_fact_without_web_key_is_not_guessed():
+def test_current_fact_without_web_key_uses_tagged_cautious_answer():
     engine = Engine(replace(Settings(), openai_key="test", tavily_key=""))
+    async def fake_create(**kwargs):
+        instruction = kwargs["messages"][0]["content"]
+        assert "无法核实" in instruction
+        assert "不要编造" in instruction
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="我无法核实当前版本，可先介绍模型系列。"))])
+    engine.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
     result = asyncio.run(engine.ask("现在最新的 Qwen 版本是什么？"))
-    assert result["source_mode"] == "unavailable"
-    assert "需要查证" in result["answer"]
+    assert result["source_mode"] == "model_fallback"
+    assert "无法核实" in result["answer"]
+    assert "未经资料核实" in result["answer_tag"]
 
 
 def test_ambiguous_need_and_comparison_queries_use_small_model_calls():

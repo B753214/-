@@ -47,7 +47,13 @@ function renderEntry(entry) {
     const box = document.createElement('div'); box.className = 'answer-box';
     const title = document.createElement('b'); title.textContent = entry.question ? `AI 回答 · ${entry.question}` : 'AI 回答';
     const body = document.createElement('div'); body.textContent = entry.answer || '正在生成…';
-    box.append(title, body);
+    box.append(title);
+    if (entry.sourceMode === 'model_fallback') {
+      const tag = document.createElement('span'); tag.className = 'answer-tag';
+      tag.textContent = entry.answerTag || '模型经验回答 · 未经资料核实';
+      box.append(tag);
+    }
+    box.append(body);
     if (entry.sources?.length) {
       const sources = document.createElement('div'); sources.className = 'source-line';
       sources.textContent = `来源：${entry.sources.map(s => s.title || s.source).join('；')}`;
@@ -124,7 +130,7 @@ async function generateAnswer(entry, epoch) {
         const event = JSON.parse(line);
         if (event.type === 'delta') { entry.answer += event.text; renderLog(); }
         if (event.type === 'error') throw Error(event.message);
-        if (event.type === 'done') { entry.answer = event.result.answer; entry.sources = event.result.sources || []; entry.sourceMode = event.result.source_mode; entry.aiState = 'answered'; persist(); renderLog(); return; }
+        if (event.type === 'done') { entry.answer = event.result.answer; entry.sources = event.result.sources || []; entry.sourceMode = event.result.source_mode; entry.answerTag = event.result.answer_tag; entry.aiState = 'answered'; persist(); renderLog(); return; }
       }
     }
     throw Error('回答连接中断');
@@ -284,6 +290,7 @@ function exportSession() {
   for (const entry of session.entries) {
     lines.push(`## ${clock(entry.at)} ${entry.role === 'me' ? '我' : '面试官'}`, '', entry.text, '');
     if (entry.question) lines.push(`**识别问题：** ${entry.question}`, '', `**AI 回答：** ${entry.answer || '未完成'}`, '');
+    if (entry.sourceMode === 'model_fallback') lines.push(`**回答标识：** ${entry.answerTag || '模型经验回答 · 未经资料核实'}`, '');
     for (const source of entry.sources || []) lines.push(`- 来源：${source.title || ''} ${source.source || ''}`);
     if (entry.sources?.length) lines.push('');
   }

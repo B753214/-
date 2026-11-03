@@ -246,16 +246,19 @@ class Engine:
         return NeedDecision(decision is not False, "uncertain" if decision is not False else "stable_concept")
 
     async def interview_question(self, speech: str) -> str | None:
-        """Extract an interview question without inventing missing speech."""
+        """Classify and lightly normalize ASR speech in one fast model call."""
         prompt = (
-            "This is a completed utterance from a technical interviewer. Decide if the candidate is expected to answer. "
+            "This is ASR text from a completed utterance by a technical interviewer. Decide if the candidate is expected to answer. "
             "Explicit questions and requests such as 'describe', 'tell me about', '说说' and '介绍一下' count. "
             "A standalone recognizable technical topic such as 'Webpack tree shaking' or 'MVCC' also counts as "
             "an implicit request to explain that topic, even without a question mark. "
             "Greetings, acknowledgements, ordinary statements and unfinished fragments such as '你能' do not count. "
             "Return JSON only: {\"is_question\":true,\"question\":\"...\"}. "
             "For a topic phrase, turn it into a short 'Explain <topic>' question in the utterance's language. "
-            "Keep the original meaning; never add a new topic.\nSpeech: " + speech.strip()[:1200]
+            "ASR can mishear accented or nonstandard pronunciation. In the question field, correct only an obvious technical term "
+            "when the surrounding speech clearly supports it; otherwise preserve the heard words. "
+            "Keep the original language and meaning. Never invent missing speech, a new topic, or a specific technology from an ambiguous sound.\n"
+            "Speech: " + speech.strip()[:1200]
         )
         response = await self.client.chat.completions.create(
             model=self.config.router_model, temperature=0,
@@ -270,10 +273,19 @@ class Engine:
         return question.strip() if result.get("is_question") is True and isinstance(question, str) and question.strip() else None
 
     async def _generate(self, question: str, lang: str, hits: list[Hit] | None = None,
-                        on_token: Callable[[str], Awaitable[None]] | None = None) -> str:
+                        on_token: Callable[[str], Awaitable[None]] | None = None,
+                        experience_fallback: bool = False) -> str:
         if hits is None:
-            instruction = ("用中文回答。只回答稳定的通用知识；如果问题依赖最新信息、个人资料或你没有把握，明确说明需要核实，不要编造。"
-                           if lang == "zh" else "Answer in English. Answer stable general knowledge only. If current or private facts are needed, say they need verification; do not guess.")
+            if experience_fallback:
+                instruction = ("用中文根据已有知识尽力回答。没有可靠的知识库资料或网络搜索结果；不要声称读过文档或网页，不要编造引用。"
+                               "给出有帮助的通用解释和推理；涉及最新信息、特定链接内容、个人资料或高风险事实时，说明哪些部分无法核实，不要编造具体事实。"
+                               if lang == "zh" else
+                               "Answer in English from your general knowledge as helpfully as possible. No reliable knowledge-base or web evidence is available. "
+                               "Do not claim to have read documents or webpages or invent citations. For current, URL-specific, private, or high-stakes facts, "
+                               "state what cannot be verified and do not invent specifics.")
+            else:
+                instruction = ("用中文回答。只回答稳定的通用知识；如果问题依赖最新信息、个人资料或你没有把握，明确说明需要核实，不要编造。"
+                               if lang == "zh" else "Answer in English. Answer stable general knowledge only. If current or private facts are needed, say they need verification; do not guess.")
             user_content = question
         else:
             context = "\n\n".join(f"[{i}] {h.metadata.get('title', '')} | {h.metadata.get('source', '')}\n{h.text[:12000 if len(hits) == 1 else 1800]}" for i, h in enumerate(hits, 1))
@@ -294,6 +306,15 @@ class Engine:
                 parts.append(token)
                 await on_token(token)
         return "".join(parts)
+
+    async def _experience_answer(self, question: str, lang: str, start: float, route_ms: int,
+                                 retrieval_ms: int, reason: str,
+                                 on_token: Callable[[str], Awaitable[None]] | None) -> dict:
+        answer = await self._generate(question, lang, on_token=on_token, experience_fallback=True)
+        return {"answer": answer, "answer_tag": "模型经验回答 · 未经资料核实" if lang == "zh" else "Model knowledge · Unverified",
+                "language": lang, "source_mode": "model_fallback", "sources": [], "retrieval_ms": retrieval_ms,
+                "route_reason": reason, "route_ms": route_ms,
+                "total_ms": round((time.perf_counter() - start) * 1000)}
 
     async def ask(self, question: str, on_token: Callable[[str], Awaitable[None]] | None = None) -> dict:
         question = question.strip()
@@ -318,21 +339,18 @@ class Engine:
         source_mode, url = source_for(question, need.reason)
         retrieval_start = time.perf_counter()
         if source_mode == "knowledge_base":
+            if self.index is None:
+                return await self._experience_answer(question, lang, start, route_ms, 0,
+                                                     "knowledge_base_missing", on_token)
             hits, vector_score = await self._retrieve(question)
             hits, quality = await self._rank(question, hits, vector_score)
             if not relevant(quality, self.config.relevance_threshold):
                 if self.config.web_fallback_enabled and self.config.tavily_key:
                     hits = await self._web(question)
                     source_mode = "web"
-                elif self.config.web_fallback_enabled:
-                    answer = ("知识库未找到足够可靠的资料；需要继续联网查证，但当前未配置网络搜索。" if lang == "zh"
-                              else "The knowledge base did not provide reliable evidence, and web search is not configured.")
-                    return {"answer": answer, "language": lang, "source_mode": "unavailable", "sources": [],
-                            "retrieval_ms": round((time.perf_counter() - retrieval_start) * 1000),
-                            "route_reason": "knowledge_base_low_quality", "route_ms": route_ms,
-                            "total_ms": round((time.perf_counter() - start) * 1000)}
                 else:
-                    hits = []
+                    return await self._experience_answer(question, lang, start, route_ms,
+                        round((time.perf_counter() - retrieval_start) * 1000), "knowledge_base_low_quality", on_token)
         elif source_mode == "notion_url":
             match = PAGE_ID.search(url or "")
             if not match:
@@ -348,19 +366,16 @@ class Engine:
                             "total_ms": round((time.perf_counter() - start) * 1000)}
                 hits, _ = await self._retrieve(question, source)
         elif not self.config.web_fallback_enabled or not self.config.tavily_key:
-            answer = ("这个问题需要查证外部资料，但当前未配置可用的网络搜索。" if lang == "zh"
-                      else "This question needs external verification, but web search is not configured.")
-            return {"answer": answer, "language": lang, "source_mode": "unavailable", "sources": [], "retrieval_ms": 0,
-                    "route_reason": need.reason, "route_ms": route_ms,
-                    "total_ms": round((time.perf_counter() - start) * 1000)}
+            return await self._experience_answer(question, lang, start, route_ms, 0,
+                                                 "search_unavailable", on_token)
         elif source_mode == "web_url":
             hits = await self._extract_url(url or "", question)
         else:
             hits = await self._web(question)
         retrieved_ms = round((time.perf_counter() - retrieval_start) * 1000)
         if not hits:
-            answer = "未找到足够可靠的资料来回答这个问题。" if lang == "zh" else "I couldn't find reliable information to answer that question."
-            source_mode = "none"
+            return await self._experience_answer(question, lang, start, route_ms, retrieved_ms,
+                                                 "no_reliable_evidence", on_token)
         else:
             answer = await self._generate(question, lang, hits, on_token=on_token)
         return {"answer": answer, "language": lang, "source_mode": source_mode,

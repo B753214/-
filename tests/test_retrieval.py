@@ -39,22 +39,43 @@ def test_identity_question_skips_retrieval_and_web():
     assert conversational_answer("Webpack 的 HMR 是什么？") is None
 
 
-def test_low_relevance_without_web_key_reports_unavailable_fallback():
+def test_low_relevance_without_web_key_uses_tagged_model_experience():
     engine = Engine(replace(Settings(), openai_key="test", tavily_key="", web_fallback_enabled=True))
 
     async def no_hits(_):
         return [], 0.0
 
     engine._retrieve = no_hits
+    engine.index = object()
+    async def answer(*_, **kwargs):
+        assert kwargs["experience_fallback"] is True
+        return "根据一般经验，可以先检查配置。"
+    engine._generate = answer
     result = asyncio.run(engine.ask("知识库里没有的内容是什么？"))
-    assert result["source_mode"] == "unavailable"
+    assert result["source_mode"] == "model_fallback"
     assert result["sources"] == []
-    assert "知识库未找到" in result["answer"]
-    assert "联网" in result["answer"]
+    assert result["answer"].startswith("根据一般经验")
+    assert "未经资料核实" in result["answer_tag"]
+
+
+def test_empty_web_results_use_tagged_model_experience():
+    engine = Engine(replace(Settings(), openai_key="test", tavily_key="test", web_fallback_enabled=True))
+    async def no_hits(_):
+        return []
+    async def answer(*_, **kwargs):
+        assert kwargs["experience_fallback"] is True
+        return "I can explain the general concept, but cannot verify the latest state."
+    engine._web = no_hits
+    engine._generate = answer
+    result = asyncio.run(engine.ask("What is the latest Qwen model?"))
+    assert result["source_mode"] == "model_fallback"
+    assert result["answer_tag"] == "Model knowledge · Unverified"
+    assert result["sources"] == []
 
 
 def test_low_relevance_with_web_key_falls_back_to_web():
     engine = Engine(replace(Settings(), openai_key="test", tavily_key="test", web_fallback_enabled=True))
+    engine.index = object()
 
     async def no_hits(_):
         return [], 0.0
