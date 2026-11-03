@@ -28,10 +28,24 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 
 class Question(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
+    force_knowledge_base: bool = False
 
 
 class InterviewSpeech(BaseModel):
     text: str = Field(min_length=1, max_length=1200)
+
+
+class InterviewAnswer(BaseModel):
+    question: str = Field(min_length=1, max_length=1200)
+    answer: str = Field(min_length=1, max_length=4000)
+    reference_answer: str | None = Field(default=None, max_length=8000)
+    reference_mode: str | None = None
+
+
+class InterviewQuestion(BaseModel):
+    question: str = Field(min_length=1, max_length=1200)
+    reference_answer: str | None = Field(default=None, max_length=8000)
+    reference_mode: str | None = None
 
 
 @app.get("/")
@@ -77,6 +91,27 @@ async def live_question(payload: InterviewSpeech):
         raise HTTPException(503, "问题判断暂时无响应") from exc
 
 
+@app.post("/api/live/assess")
+async def live_assess(payload: InterviewAnswer):
+    try:
+        return await engine.assess_interview_answer(payload.question, payload.answer,
+                                                    payload.reference_answer, payload.reference_mode)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except (APITimeoutError, APIConnectionError) as exc:
+        raise HTTPException(503, "回答分析暂时无响应") from exc
+
+
+@app.post("/api/live/analyze-question")
+async def live_analyze_question(payload: InterviewQuestion):
+    try:
+        return await engine.analyze_interview_question(payload.question, payload.reference_answer, payload.reference_mode)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except (APITimeoutError, APIConnectionError) as exc:
+        raise HTTPException(503, "面试问题分析暂时无响应") from exc
+
+
 @app.post("/api/ask/stream")
 async def ask_stream(payload: Question):
     async def events():
@@ -87,7 +122,10 @@ async def ask_stream(payload: Question):
 
         async def worker():
             try:
-                result = await engine.ask(payload.question, on_token=on_token)
+                if payload.force_knowledge_base:
+                    result = await engine.ask(payload.question, on_token=on_token, force_knowledge_base=True)
+                else:
+                    result = await engine.ask(payload.question, on_token=on_token)
                 await queue.put({"type": "done", "result": result})
             except (ValueError, RuntimeError) as exc:
                 await queue.put({"type": "error", "message": str(exc)})

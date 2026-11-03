@@ -92,3 +92,31 @@ def test_low_relevance_with_web_key_falls_back_to_web():
     result = asyncio.run(engine.ask("我的知识库里这个问题如何回答？"))
     assert result["source_mode"] == "web"
     assert result["sources"][0]["kind"] == "web"
+
+
+def test_interview_question_forces_knowledge_base_then_web_fallback():
+    engine = Engine(replace(Settings(), openai_key="test", tavily_key="test", web_fallback_enabled=True))
+    engine.index = object()
+    calls = []
+
+    async def no_router(_):
+        raise AssertionError("interview question should not skip retrieval")
+
+    async def no_hits(query):
+        calls.append(("knowledge_base", query))
+        return [], 0.0
+
+    async def web_hits(query):
+        calls.append(("web", query))
+        return [Hit("web", "Evidence", {"title": "Web", "source": "https://example.com", "kind": "web"})]
+
+    async def answer(*_, **__):
+        return "回答"
+
+    engine._decide_need = no_router
+    engine._retrieve = no_hits
+    engine._web = web_hits
+    engine._generate = answer
+    result = asyncio.run(engine.ask("HMR 的原理是什么？", force_knowledge_base=True))
+    assert calls == [("knowledge_base", "HMR 的原理是什么？"), ("web", "HMR 的原理是什么？")]
+    assert result["source_mode"] == "web"

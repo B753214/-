@@ -1,15 +1,19 @@
-const ui = Object.fromEntries(['live-panel','panel-mount','start','end','float','export','ai-options','ai-switch','bleed-switch','session-state','status','interviewer-preview','me-preview','count','log'].map(id => [id, document.getElementById(id)]));
+const ui = Object.fromEntries(['live-panel','panel-mount','start','end','float','export','ai-options','ai-switch','assess-switch','bleed-switch','session-state','status','interviewer-preview','me-preview','count','log'].map(id => [id, document.getElementById(id)]));
 const storeKey = 'atlas-live-session';
 let session = { startedAt: null, endedAt: null, entries: [] };
 try { session = JSON.parse(sessionStorage.getItem(storeKey)) || session; } catch {}
 if (session.startedAt && !session.endedAt) session.endedAt = new Date().toISOString();
 let displayStream, microphoneStream, audioContext, audioNodes = [], sockets = {};
-let running = false, starting = false, stopping = false, aiSince = 0, aiEpoch = 0;
-let interviewerStartedAt = 0, interviewerBuffer = [], questionJobs = Promise.resolve(), answerJobs = Promise.resolve(), activeAnswerController;
+let running = false, starting = false, stopping = false, aiSince = 0, aiEpoch = 0, answerEpoch = 0;
+let assessSince = 0, assessEpoch = 0, sessionEpoch = 0, assessmentSeq = 0;
+let interviewerStartedAt = 0, meStartedAt = 0, interviewerBuffer = [], questionJobs = Promise.resolve(), answerJobs = Promise.resolve(), activeAnswerController;
+let assessmentTimer, assessmentJob = Promise.resolve(), pendingMeEntries = [], activeAssessmentController, questionAnalysisControllers = new Set();
+let answerJobById = new Map();
 let lastPlaybackAt = 0;
 let pipWindow = null;
 
 const clock = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const answerVisible = () => ui['ai-switch'].checked || ui['assess-switch'].checked;
 function persist() { sessionStorage.setItem(storeKey, JSON.stringify(session)); }
 function status(text, error = false) { ui.status.textContent = text; ui.status.classList.toggle('error', error); }
 function buttons() {
@@ -18,6 +22,7 @@ function buttons() {
   ui.float.disabled = !running && !session.startedAt;
   ui.export.disabled = stopping || !session.entries.length;
   ui['ai-switch'].disabled = !running && (!session.startedAt || starting || stopping);
+  ui['assess-switch'].disabled = !running && (!session.startedAt || starting || stopping);
   ui['session-state'].textContent = running ? '录制中' : session.startedAt ? '已结束' : '未开始';
   ui['session-state'].classList.toggle('active', running);
   ui.count.textContent = `${session.entries.length} 条`;
@@ -33,17 +38,17 @@ function renderEntry(entry) {
   head.append(name, time);
   const text = document.createElement('div'); text.className = 'entry-text'; text.textContent = entry.text;
   card.append(head, text);
-  if (entry.role === 'interviewer' && entry.aiEligible && ui['ai-switch'].checked && entry.aiState) {
+  if (entry.role === 'interviewer' && (entry.aiEligible || entry.assessmentQuestionEligible) && answerVisible() && entry.aiState) {
     const decision = document.createElement('div'); decision.className = 'source-line';
     decision.textContent = ({ ai_off: '仅记录 · AI 已关闭', pre_switch: '仅记录 · 这段话在 AI 开启前开始', judging: '正在判断是否为面试问题…', not_question: '未识别为问题', judge_error: '问题判断失败', answer_error: '回答失败', queued: '已识别为问题 · 等待回答', answering: '正在生成回答…', answered: '已回答', stopped: 'AI 回答已停止' })[entry.aiState] || '';
     card.append(decision);
-    if (entry.aiEligible && !entry.question && ui['ai-switch'].checked && ['not_question','judge_error'].includes(entry.aiState)) {
+    if (!entry.question && answerVisible() && ['not_question','judge_error'].includes(entry.aiState)) {
       const manual = document.createElement('button'); manual.type = 'button'; manual.className = 'manual-answer';
       manual.textContent = '按这段话回答'; manual.onclick = () => answerManually(entry);
       card.append(manual);
     }
   }
-  if (ui['ai-switch'].checked && (entry.question || entry.answer !== undefined)) {
+  if (answerVisible() && entry.answer !== undefined) {
     const box = document.createElement('div'); box.className = 'answer-box';
     const title = document.createElement('b'); title.textContent = entry.question ? `AI 回答 · ${entry.question}` : 'AI 回答';
     const body = document.createElement('div'); body.textContent = entry.answer || '正在生成…';
@@ -61,7 +66,48 @@ function renderEntry(entry) {
     }
     card.append(box);
   }
+  if (ui['assess-switch'].checked && entry.questionAnalysis) {
+    const analysis = entry.questionAnalysis;
+    const box = assessmentBox('面试官问题分析', analysis.verification_tag);
+    appendLine(box, '考点', analysis.focus);
+    appendPoints(box, '应答要点', analysis.expected_points);
+    appendLine(box, '', analysis.error || (analysis.pending ? '正在分析问题…' : ''));
+    card.append(box);
+  }
+  if (ui['assess-switch'].checked && entry.assessment) {
+    const assessment = entry.assessment;
+    const verdicts = { correct: '正确', partial: '部分正确', incorrect: '需要纠正', uncertain: '暂无法判断' };
+    const box = assessmentBox(`我的回答分析${assessment.verdict ? ` · ${verdicts[assessment.verdict] || assessment.verdict}` : ''}`, assessment.verification_tag);
+    appendLine(box, '正确性', assessment.correctness);
+    appendLine(box, '完整度', assessment.completeness);
+    appendLine(box, '说明', assessment.explanation);
+    appendPoints(box, '遗漏要点', assessment.missing_points);
+    appendLine(box, '补充回答', assessment.supplement);
+    appendLine(box, '', assessment.error || (assessment.pending ? '正在分析回答…' : ''));
+    card.append(box);
+  }
   return card;
+}
+function assessmentBox(title, verificationTag) {
+  const box = document.createElement('div'); box.className = 'assessment-box';
+  const heading = document.createElement('b'); heading.textContent = title; box.append(heading);
+  if (verificationTag) {
+    const tag = document.createElement('span');
+    tag.className = `answer-tag${verificationTag.includes('未经') || verificationTag.includes('Unverified') ? ' unverified' : ''}`;
+    tag.textContent = verificationTag; box.append(tag);
+  }
+  return box;
+}
+function appendLine(box, label, value) {
+  if (!value) return;
+  const line = document.createElement('p'); line.textContent = label ? `${label}：${value}` : value; box.append(line);
+}
+function appendPoints(box, label, points) {
+  if (!points?.length) return;
+  const title = document.createElement('p'); title.textContent = `${label}：`; box.append(title);
+  const list = document.createElement('ul');
+  for (const point of points) { const item = document.createElement('li'); item.textContent = point; list.append(item); }
+  box.append(list);
 }
 function renderLog() {
   ui.log.replaceChildren();
@@ -77,8 +123,8 @@ function addTranscript(role, text) {
   return entry;
 }
 
-async function classifyAndAnswer(entry, epoch) {
-  if (!ui['ai-switch'].checked || epoch !== aiEpoch) { entry.aiState = 'stopped'; persist(); renderLog(); return; }
+async function classifyAndAnswer(entry, generation) {
+  if (generation !== sessionEpoch) return;
   interviewerBuffer.push(entry.text);
   interviewerBuffer = interviewerBuffer.slice(-3);
   let response;
@@ -86,36 +132,74 @@ async function classifyAndAnswer(entry, epoch) {
     response = await fetch('/api/live/question', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: interviewerBuffer.join(' ').slice(-1200) }) });
     if (!response.ok) throw Error('问题判断失败');
     response = await response.json();
-  } catch (error) { entry.aiState = 'judge_error'; persist(); renderLog(); status(error.message, true); return; }
-  if (!ui['ai-switch'].checked || epoch !== aiEpoch) { entry.aiState = 'stopped'; persist(); renderLog(); return; }
-  if (!response.question) { entry.aiState = 'not_question'; persist(); renderLog(); return; }
+  } catch (error) { if (generation !== sessionEpoch) return; entry.aiState = 'judge_error'; if (entry.assessmentQuestionEligible) entry.questionAnalysis = { error: '问题判断失败' }; persist(); renderLog(); status(error.message, true); return; }
+  if (generation !== sessionEpoch) return;
+  if (!response.question) { entry.aiState = 'not_question'; delete entry.questionAnalysis; persist(); renderLog(); return; }
   interviewerBuffer = [];
   entry.question = response.question;
-  entry.answer = '';
-  entry.aiState = 'queued';
+  if ((entry.aiEligible && ui['ai-switch'].checked && entry.aiEpoch === aiEpoch) ||
+      (entry.assessmentQuestionEligible && ui['assess-switch'].checked && entry.assessEpoch === assessEpoch)) {
+    entry.answer = ''; entry.aiState = 'queued';
+    answerJobs = answerJobs.then(() => generateAnswer(entry, answerEpoch));
+    answerJobById.set(entry.id, answerJobs);
+  }
+  if (entry.assessmentQuestionEligible && ui['assess-switch'].checked && entry.assessEpoch === assessEpoch) {
+    entry.questionAnalysis = { pending: true };
+    analyzeQuestion(entry, generation, entry.assessEpoch, answerJobs);
+  }
   persist(); renderLog();
-  answerJobs = answerJobs.then(() => generateAnswer(entry, epoch));
+}
+
+async function analyzeQuestion(entry, generation, epoch, referenceJob) {
+  const controller = new AbortController(); questionAnalysisControllers.add(controller);
+  const timeout = setTimeout(() => controller.abort(), 90000);
+  try {
+    await referenceJob;
+    if (generation !== sessionEpoch || epoch !== assessEpoch || controller.signal.aborted) return;
+    if (entry.aiState !== 'answered' || !entry.answer) {
+      entry.questionAnalysis = { error: '问题回答未完成，暂无法分析考点' };
+      persist(); renderLog(); return;
+    }
+    const reference = { reference_answer: entry.answer.slice(0, 8000), reference_mode: entry.sourceMode };
+    const response = await fetch('/api/live/analyze-question', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: entry.question, ...reference }), signal: controller.signal
+    });
+    if (!response.ok) throw Error('问题分析请求失败');
+    const result = await response.json();
+    if (generation !== sessionEpoch || epoch !== assessEpoch) return;
+    entry.questionAnalysis = result; persist(); renderLog();
+  } catch (error) {
+    if (generation !== sessionEpoch || epoch !== assessEpoch) return;
+    entry.questionAnalysis = { error: error.name === 'AbortError' ? '问题分析超时' : error.message };
+    persist(); renderLog();
+  } finally { clearTimeout(timeout); questionAnalysisControllers.delete(controller); }
 }
 
 function answerManually(entry) {
-  if (!ui['ai-switch'].checked || entry.question) return;
+  if (!answerVisible() || entry.question) return;
   entry.question = entry.text;
   entry.answer = '';
   entry.aiState = 'queued';
   interviewerBuffer = [];
   persist(); renderLog();
-  const epoch = aiEpoch;
+  const epoch = answerEpoch;
   answerJobs = answerJobs.then(() => generateAnswer(entry, epoch));
+  answerJobById.set(entry.id, answerJobs);
+  if (ui['assess-switch'].checked && entry.assessmentQuestionEligible && entry.assessEpoch === assessEpoch) {
+    entry.questionAnalysis = { pending: true };
+    analyzeQuestion(entry, sessionEpoch, assessEpoch, answerJobs);
+  }
 }
 
 async function generateAnswer(entry, epoch) {
-  if (!ui['ai-switch'].checked || epoch !== aiEpoch) { entry.aiState = 'stopped'; persist(); renderLog(); return; }
+  if (!answerVisible() || epoch !== answerEpoch) { entry.aiState = 'stopped'; persist(); renderLog(); return; }
   entry.aiState = 'answering'; persist(); renderLog();
   activeAnswerController = new AbortController();
   const controller = activeAnswerController;
   const timeout = setTimeout(() => controller.abort(), 90000);
   try {
-    const response = await fetch('/api/ask/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: entry.question }), signal: controller.signal });
+    const response = await fetch('/api/ask/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: entry.question, force_knowledge_base: true }), signal: controller.signal });
     if (!response.ok || !response.body) throw Error('回答请求失败');
     const reader = response.body.getReader(), decoder = new TextDecoder();
     let buffer = '';
@@ -142,8 +226,17 @@ async function generateAnswer(entry, epoch) {
 }
 
 function onAsrEvent(role, event) {
-  if (event.type === 'partial') { ui[`${role}-preview`].textContent = event.text || '识别中…'; if (role === 'interviewer' && !interviewerStartedAt) interviewerStartedAt = Date.now(); return; }
-  if (event.type === 'speech_started' && role === 'interviewer') { if (!interviewerStartedAt) interviewerStartedAt = Date.now(); return; }
+  if (event.type === 'partial') {
+    ui[`${role}-preview`].textContent = event.text || '识别中…';
+    if (role === 'interviewer' && !interviewerStartedAt) interviewerStartedAt = Date.now();
+    if (role === 'me' && !meStartedAt) meStartedAt = Date.now();
+    return;
+  }
+  if (event.type === 'speech_started') {
+    if (role === 'interviewer' && !interviewerStartedAt) interviewerStartedAt = Date.now();
+    if (role === 'me' && !meStartedAt) meStartedAt = Date.now();
+    return;
+  }
   if (event.type === 'error') { status(`${role === 'me' ? '麦克风' : '面试官'}识别失败：${event.message}`, true); if (running) endSession(); return; }
   if (event.type !== 'transcript') return;
   ui[`${role}-preview`].textContent = event.text || '等待语音…';
@@ -151,14 +244,74 @@ function onAsrEvent(role, event) {
   if (role === 'interviewer' && entry) {
     const beganAt = interviewerStartedAt || Date.now();
     entry.aiEligible = ui['ai-switch'].checked && beganAt >= aiSince;
-    entry.aiState = !ui['ai-switch'].checked ? 'ai_off' : !entry.aiEligible ? 'pre_switch' : 'judging';
+    entry.assessmentQuestionEligible = ui['assess-switch'].checked && beganAt >= assessSince;
+    entry.aiEpoch = aiEpoch; entry.assessEpoch = assessEpoch;
+    entry.aiState = !entry.aiEligible && !entry.assessmentQuestionEligible ? 'pre_switch' : 'judging';
     persist(); renderLog();
-    if (entry.aiEligible) {
-      const epoch = aiEpoch;
-      questionJobs = questionJobs.then(() => classifyAndAnswer(entry, epoch)).catch(error => status(`问题处理失败：${error.message}`, true));
+    if (entry.aiEligible || entry.assessmentQuestionEligible) {
+      const generation = sessionEpoch;
+      questionJobs = questionJobs.then(() => classifyAndAnswer(entry, generation)).catch(error => status(`问题处理失败：${error.message}`, true));
     }
   }
+  if (role === 'me' && entry) {
+    const beganAt = meStartedAt || Date.now();
+    entry.assessmentEligible = ui['assess-switch'].checked && beganAt >= assessSince;
+    entry.assessEpoch = assessEpoch;
+    if (entry.assessmentEligible) { pendingMeEntries.push(entry); scheduleAssessment(); }
+  }
   if (role === 'interviewer') interviewerStartedAt = 0;
+  if (role === 'me') meStartedAt = 0;
+}
+
+function scheduleAssessment(delay = 2500) {
+  clearTimeout(assessmentTimer);
+  assessmentTimer = setTimeout(() => { assessmentJob = assessPendingAnswers().catch(error => status(`回答分析失败：${error.message}`, true)); }, delay);
+}
+
+async function assessPendingAnswers() {
+  if (!pendingMeEntries.length || !ui['assess-switch'].checked) return;
+  const entries = pendingMeEntries.splice(0);
+  const epoch = assessEpoch, generation = sessionEpoch;
+  await questionJobs;
+  if (epoch !== assessEpoch || generation !== sessionEpoch || !ui['assess-switch'].checked) return;
+  const firstIndex = session.entries.indexOf(entries[0]);
+  const questionEntry = session.entries.slice(0, firstIndex).reverse().find(item => item.role === 'interviewer' && item.question && item.assessmentQuestionEligible && item.assessEpoch === epoch);
+  if (!questionEntry) return;
+  await (answerJobById.get(questionEntry.id) || Promise.resolve());
+  if (epoch !== assessEpoch || generation !== sessionEpoch || !ui['assess-switch'].checked) return;
+  const questionIndex = session.entries.indexOf(questionEntry);
+  const target = entries.at(-1);
+  const answer = session.entries.slice(questionIndex + 1, session.entries.indexOf(target) + 1)
+    .filter(item => item.role === 'me' && item.assessmentEligible && item.assessEpoch === epoch)
+    .map(item => item.text).join(' ').slice(-4000);
+  if (!answer) return;
+  for (const item of session.entries.slice(questionIndex + 1, session.entries.indexOf(target))) {
+    if (item.role === 'me') delete item.assessment;
+  }
+  if (activeAssessmentController) activeAssessmentController.abort();
+  const sequence = ++assessmentSeq;
+  const controller = new AbortController(); activeAssessmentController = controller;
+  target.assessment = { pending: true }; persist(); renderLog();
+  const timeout = setTimeout(() => controller.abort(), 90000);
+  try {
+    const reference = questionEntry.questionAnalysis?.reference_answer
+      ? { reference_answer: questionEntry.questionAnalysis.reference_answer.slice(0, 8000), reference_mode: questionEntry.questionAnalysis.reference_mode }
+      : questionEntry.aiState === 'answered' && questionEntry.answer
+        ? { reference_answer: questionEntry.answer.slice(0, 8000), reference_mode: questionEntry.sourceMode }
+        : {};
+    const response = await fetch('/api/live/assess', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: questionEntry.question, answer, ...reference }), signal: controller.signal
+    });
+    if (!response.ok) throw Error('回答分析请求失败');
+    const result = await response.json();
+    if (epoch !== assessEpoch || generation !== sessionEpoch || sequence !== assessmentSeq) return;
+    target.assessment = result; persist(); renderLog();
+  } catch (error) {
+    if (epoch !== assessEpoch || generation !== sessionEpoch || sequence !== assessmentSeq) return;
+    target.assessment = { error: error.name === 'AbortError' ? '回答分析超时' : error.message };
+    persist(); renderLog();
+  } finally { clearTimeout(timeout); if (activeAssessmentController === controller) activeAssessmentController = null; }
 }
 
 function openAsr(role) {
@@ -246,10 +399,18 @@ async function startSession() {
       try { await micTrack.applyConstraints({ echoCancellation: 'all', noiseSuppression: true }); } catch {}
     }
     session = { startedAt: new Date().toISOString(), endedAt: null, entries: [] };
-    persist(); renderLog(); interviewerBuffer = []; aiSince = 0; aiEpoch++;
-    ui['ai-switch'].checked = false;
+    sessionEpoch++; aiEpoch++; assessEpoch++; answerEpoch++; assessmentSeq++;
+    clearTimeout(assessmentTimer); pendingMeEntries = [];
+    activeAnswerController?.abort(); activeAssessmentController?.abort();
+    for (const controller of questionAnalysisControllers) controller.abort();
+    questionAnalysisControllers.clear();
+    persist(); renderLog(); interviewerBuffer = []; aiSince = 0; assessSince = 0;
+    questionJobs = Promise.resolve(); answerJobs = Promise.resolve();
+    assessmentJob = Promise.resolve();
+    answerJobById = new Map();
+    ui['ai-switch'].checked = false; ui['assess-switch'].checked = false;
     ui['ai-options'].open = false;
-    interviewerStartedAt = 0; lastPlaybackAt = 0;
+    interviewerStartedAt = 0; meStartedAt = 0; lastPlaybackAt = 0;
     status('正在连接两路实时语音识别…');
     await Promise.all([openAsr('interviewer'), openAsr('me')]);
     audioContext = new AudioContext();
@@ -280,6 +441,9 @@ async function endSession() {
     socket.addEventListener('close', () => { clearTimeout(timer); resolve(); }, { once: true });
     if (socket.readyState === WebSocket.OPEN) socket.send('stop');
   })));
+  clearTimeout(assessmentTimer);
+  if (pendingMeEntries.length) assessmentJob = assessPendingAnswers();
+  await assessmentJob;
   session.endedAt = new Date().toISOString(); persist(); stopping = false; buttons();
   status('会话已结束。记录可导出；开始新会话会覆盖当前记录。');
 }
@@ -289,7 +453,24 @@ function exportSession() {
   const lines = ['# Atlas 通话记录', '', `开始：${session.startedAt}`, `结束：${session.endedAt || '进行中'}`, ''];
   for (const entry of session.entries) {
     lines.push(`## ${clock(entry.at)} ${entry.role === 'me' ? '我' : '面试官'}`, '', entry.text, '');
-    if (entry.question) lines.push(`**识别问题：** ${entry.question}`, '', `**AI 回答：** ${entry.answer || '未完成'}`, '');
+    if (entry.question) lines.push(`**识别问题：** ${entry.question}`, '');
+    if (entry.answer !== undefined) lines.push(`**AI 回答：** ${entry.answer || '未完成'}`, '');
+    if (entry.questionAnalysis && !entry.questionAnalysis.pending) {
+      const analysis = entry.questionAnalysis;
+      if (analysis.focus) lines.push(`**面试官问题考点：** ${analysis.focus}`, '');
+      if (analysis.expected_points?.length) lines.push('**应答要点：**', ...analysis.expected_points.map(point => `- ${point}`), '');
+      if (analysis.verification_tag) lines.push(`**分析标识：** ${analysis.verification_tag}`, '');
+    }
+    if (entry.assessment && !entry.assessment.pending) {
+      const review = entry.assessment;
+      if (review.verdict) lines.push(`**我的回答判断：** ${review.verdict}`, '');
+      if (review.correctness) lines.push(`**正确性：** ${review.correctness}`, '');
+      if (review.completeness) lines.push(`**完整度：** ${review.completeness}`, '');
+      if (review.explanation) lines.push(`**说明：** ${review.explanation}`, '');
+      if (review.missing_points?.length) lines.push('**遗漏要点：**', ...review.missing_points.map(point => `- ${point}`), '');
+      if (review.supplement) lines.push(`**补充回答：** ${review.supplement}`, '');
+      if (review.verification_tag) lines.push(`**分析标识：** ${review.verification_tag}`, '');
+    }
     if (entry.sourceMode === 'model_fallback') lines.push(`**回答标识：** ${entry.answerTag || '模型经验回答 · 未经资料核实'}`, '');
     for (const source of entry.sources || []) lines.push(`- 来源：${source.title || ''} ${source.source || ''}`);
     if (entry.sources?.length) lines.push('');
@@ -320,11 +501,31 @@ ui.float.onclick = toggleFloat;
 ui.export.onclick = exportSession;
 ui['ai-switch'].onchange = () => {
   aiEpoch++; interviewerBuffer = [];
-  if (activeAnswerController) activeAnswerController.abort();
+  if (!answerVisible()) { answerEpoch++; activeAnswerController?.abort(); }
   aiSince = running && ui['ai-switch'].checked ? Date.now() : 0;
   renderLog();
   status(running
-    ? (ui['ai-switch'].checked ? 'AI 已开启：只回答现在开始的面试官问题。' : 'AI 已关闭：只记录双方语音，答案已隐藏。')
-    : (ui['ai-switch'].checked ? '已显示本次会话的 AI 答案。' : '已隐藏本次会话的 AI 答案。'));
+    ? (ui['ai-switch'].checked ? 'AI 回答已开启：回答新听到的面试官问题。' : ui['assess-switch'].checked ? 'AI 回答单独开关已关闭；双向分析仍会回答面试官问题。' : 'AI 回答已关闭：答案已隐藏，继续记录双方语音。')
+    : (answerVisible() ? '已显示本次会话的 AI 答案。' : '已隐藏本次会话的 AI 答案。'));
+};
+ui['assess-switch'].onchange = () => {
+  assessEpoch++; assessmentSeq++; interviewerBuffer = [];
+  clearTimeout(assessmentTimer); pendingMeEntries = [];
+  activeAssessmentController?.abort();
+  if (!answerVisible()) { answerEpoch++; activeAnswerController?.abort(); }
+  for (const controller of questionAnalysisControllers) controller.abort();
+  questionAnalysisControllers.clear();
+  if (!ui['assess-switch'].checked) {
+    for (const entry of session.entries) {
+      if (entry.questionAnalysis?.pending) delete entry.questionAnalysis;
+      if (entry.assessment?.pending) delete entry.assessment;
+    }
+    persist();
+  }
+  assessSince = running && ui['assess-switch'].checked ? Date.now() : 0;
+  renderLog();
+  status(running
+    ? (ui['assess-switch'].checked ? '双向分析已开启：回答新听到的面试官问题，并评价、补充你随后说出的回答。' : '双向分析已关闭：分析内容已隐藏，继续记录双方语音。')
+    : (ui['assess-switch'].checked ? '已显示本次会话的双向分析。' : '已隐藏本次会话的双向分析。'));
 };
 persist(); renderLog();
