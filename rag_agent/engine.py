@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import pymupdf
 from llama_index.core import Document, StorageContext, VectorStoreIndex, load_index_from_storage
 from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.vector_stores import MetadataFilter, MetadataFilters
 from llama_index.embeddings.openai import OpenAIEmbedding
 from openai import AsyncOpenAI
 from . import bm25_store
@@ -146,19 +147,21 @@ class Engine:
         self.index, self.nodes, self.bm25 = index, stored_nodes, bm25 if self.config.bm25_enabled else None
         return {"documents": len(documents), "chunks": len(nodes)}
 
-    def _bm25_hits(self, query: str) -> list[Hit]:
+    def _bm25_hits(self, query: str, source: str | None = None) -> list[Hit]:
         if not self.bm25:
             return []
         scores = self.bm25.get_scores(tokens(query))
-        indexes = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:self.config.bm25_top_k]
+        indexes = sorted((i for i in range(len(scores)) if source is None or self.nodes[i].metadata.get("source") == source),
+                         key=lambda i: scores[i], reverse=True)[:self.config.bm25_top_k]
         return [Hit(self.nodes[i].node_id, self.nodes[i].text, self.nodes[i].metadata, float(scores[i])) for i in indexes if scores[i] > 0]
 
-    async def _retrieve(self, query: str) -> tuple[list[Hit], float]:
+    async def _retrieve(self, query: str, source: str | None = None) -> tuple[list[Hit], float]:
         if self.index is None:
             raise RuntimeError("知识库尚未建立索引；请先运行 python -m rag_agent.ingest")
-        retriever = self.index.as_retriever(similarity_top_k=self.config.vector_top_k)
+        filters = MetadataFilters(filters=[MetadataFilter(key="source", value=source)]) if source else None
+        retriever = self.index.as_retriever(similarity_top_k=self.config.vector_top_k, filters=filters)
         vector_task = asyncio.to_thread(retriever.retrieve, query)
-        bm25_task = asyncio.to_thread(self._bm25_hits, query) if self.config.bm25_enabled else None
+        bm25_task = asyncio.to_thread(self._bm25_hits, query, source) if self.config.bm25_enabled else None
         vector_nodes, lexical = await asyncio.gather(vector_task, bm25_task) if bm25_task else (await vector_task, [])
         vectors = [Hit(item.node.node_id, item.node.text, item.node.metadata, item.score or 0) for item in vector_nodes]
         return fuse_rrf([vectors, lexical], self.config.fusion_top_k), max((hit.score for hit in vectors), default=0.0)
@@ -336,9 +339,14 @@ class Engine:
                 hits = []
             else:
                 page_id = match.group().replace("-", "").lower()
-                pages = await read_pages(replace(self.config, notion_page_ids=(page_id,), notion_include_subpages=False))
-                hits = [Hit(page_id, content, {"title": page_title(content, page_id), "source": url, "kind": "notion"})
-                        for _, content in pages]
+                source = f"https://app.notion.com/p/{page_id}"
+                if not any(node.metadata.get("source") == source for node in self.nodes):
+                    answer = ("这个 Notion 页面尚未导入本地知识库；请先运行 python -m rag_agent.ingest --notion <页面链接>，再重启服务。"
+                              if lang == "zh" else "This Notion page is not in the local index. Import it with python -m rag_agent.ingest --notion <page URL>, then restart the service.")
+                    return {"answer": answer, "language": lang, "source_mode": "unavailable", "sources": [],
+                            "retrieval_ms": 0, "route_reason": "notion_page_not_indexed", "route_ms": route_ms,
+                            "total_ms": round((time.perf_counter() - start) * 1000)}
+                hits, _ = await self._retrieve(question, source)
         elif not self.config.web_fallback_enabled or not self.config.tavily_key:
             answer = ("这个问题需要查证外部资料，但当前未配置可用的网络搜索。" if lang == "zh"
                       else "This question needs external verification, but web search is not configured.")

@@ -47,7 +47,8 @@ def test_notion_upsert_replaces_only_fetched_pages(tmp_path, monkeypatch):
     monkeypatch.setattr(Engine, "_embed", lambda self: MockEmbedding(embed_dim=8))
     pdf_dir = tmp_path / "pdfs"
     pdf_dir.mkdir()
-    config = replace(Settings(), openai_key="test", index_dir=tmp_path / "index", pdf_dir=pdf_dir)
+    config = replace(Settings(), openai_key="test", index_dir=tmp_path / "index", pdf_dir=pdf_dir,
+                     rerank_enabled=False)
     pdf_path = pdf_dir / "local.pdf"
     _write_pdf(pdf_path, "Local PDF stays indexed")
     asyncio.run(Engine(config).upsert_pdf(pdf_path))
@@ -70,3 +71,20 @@ def test_notion_upsert_replaces_only_fetched_pages(tmp_path, monkeypatch):
     assert any("Local PDF" in node.text for node in reloaded.nodes)
     assert any("updated containers" in node.text for node in reloaded.nodes)
     assert not any("about Docker" in node.text for node in reloaded.nodes)
+
+    async def never_fetch(_):
+        raise AssertionError("online Notion fetch is forbidden during startup and Q&A")
+
+    async def answer(*_, **__):
+        return "Local answer [1]"
+
+    monkeypatch.setattr(engine_module, "read_pages", never_fetch)
+    reloaded = Engine(config)
+    assert reloaded.load()
+    reloaded._generate = answer
+    result = asyncio.run(reloaded.ask(f"请根据 https://app.notion.com/p/{page_id} 解释容器"))
+    assert result["source_mode"] == "notion_url"
+    assert result["sources"][0]["kind"] == "notion"
+    missing = asyncio.run(reloaded.ask(f"请根据 https://app.notion.com/p/{'b' * 32} 回答"))
+    assert missing["source_mode"] == "unavailable"
+    assert "尚未导入" in missing["answer"]
