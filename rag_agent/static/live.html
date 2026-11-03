@@ -16,14 +16,14 @@
           <div><div class="eyebrow">LIVE INTERVIEW</div><h1>通话辅助</h1></div>
           <span id="session-state" class="badge">未开始</span>
         </header>
-        <p class="intro">同时记录你的麦克风和电脑播放的面试官声音。面试官停顿形成完整转写后判断是否提问；AI 仅在开启后回答新问题，答案只显示为文字。</p>
+        <p class="intro">同时记录你的麦克风和电脑播放的面试官声音，完整转写保存在本次会话中。</p>
         <div class="controls">
           <button id="start" class="primary">开始会话</button>
           <button id="end" disabled>结束会话</button>
           <button id="float" disabled>悬浮小窗</button>
           <button id="export" disabled>导出记录</button>
         </div>
-        <label class="switch-row" for="ai-switch"><span><strong>AI 回答</strong><small>关闭时只记录；开启后只回答新听到的面试官问题</small></span><input id="ai-switch" type="checkbox" disabled><span class="switch" aria-hidden="true"></span></label>
+        <details id="ai-options" class="ai-options"><summary title="更多设置">更多设置</summary><label class="switch-row" for="ai-switch"><span><strong>AI 回答</strong><small>关闭时隐藏答案；开启后只回答新听到的面试官问题</small></span><input id="ai-switch" type="checkbox" disabled><span class="switch" aria-hidden="true"></span></label></details>
         <label class="switch-row bleed-row" for="bleed-switch"><span><strong>防串音</strong><small>面试官说话时暂停麦克风转写；双方同时说话时可能漏掉你的声音</small></span><input id="bleed-switch" type="checkbox" checked><span class="switch" aria-hidden="true"></span></label>
         <div id="status" class="status" role="status">点击“开始会话”，共享会议音频并允许麦克风。使用桌面版 Chrome 或 Edge。</div>
         <div class="previews"><div><b>面试官 · 电脑声音</b><p id="interviewer-preview">等待语音…</p></div><div><b>我 · 麦克风</b><p id="me-preview">等待语音…</p></div></div>

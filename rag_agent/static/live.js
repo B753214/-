@@ -1,4 +1,4 @@
-const ui = Object.fromEntries(['live-panel','panel-mount','start','end','float','export','ai-switch','bleed-switch','session-state','status','interviewer-preview','me-preview','count','log'].map(id => [id, document.getElementById(id)]));
+const ui = Object.fromEntries(['live-panel','panel-mount','start','end','float','export','ai-options','ai-switch','bleed-switch','session-state','status','interviewer-preview','me-preview','count','log'].map(id => [id, document.getElementById(id)]));
 const storeKey = 'atlas-live-session';
 let session = { startedAt: null, endedAt: null, entries: [] };
 try { session = JSON.parse(sessionStorage.getItem(storeKey)) || session; } catch {}
@@ -17,7 +17,7 @@ function buttons() {
   ui.end.disabled = !running;
   ui.float.disabled = !running && !session.startedAt;
   ui.export.disabled = stopping || !session.entries.length;
-  ui['ai-switch'].disabled = !running;
+  ui['ai-switch'].disabled = !running && (!session.startedAt || starting || stopping);
   ui['session-state'].textContent = running ? '录制中' : session.startedAt ? '已结束' : '未开始';
   ui['session-state'].classList.toggle('active', running);
   ui.count.textContent = `${session.entries.length} 条`;
@@ -33,7 +33,7 @@ function renderEntry(entry) {
   head.append(name, time);
   const text = document.createElement('div'); text.className = 'entry-text'; text.textContent = entry.text;
   card.append(head, text);
-  if (entry.role === 'interviewer' && entry.aiState) {
+  if (entry.role === 'interviewer' && entry.aiEligible && ui['ai-switch'].checked && entry.aiState) {
     const decision = document.createElement('div'); decision.className = 'source-line';
     decision.textContent = ({ ai_off: '仅记录 · AI 已关闭', pre_switch: '仅记录 · 这段话在 AI 开启前开始', judging: '正在判断是否为面试问题…', not_question: '未识别为问题', judge_error: '问题判断失败', answer_error: '回答失败', queued: '已识别为问题 · 等待回答', answering: '正在生成回答…', answered: '已回答', stopped: 'AI 回答已停止' })[entry.aiState] || '';
     card.append(decision);
@@ -43,7 +43,7 @@ function renderEntry(entry) {
       card.append(manual);
     }
   }
-  if (entry.question || entry.answer !== undefined) {
+  if (ui['ai-switch'].checked && (entry.question || entry.answer !== undefined)) {
     const box = document.createElement('div'); box.className = 'answer-box';
     const title = document.createElement('b'); title.textContent = entry.question ? `AI 回答 · ${entry.question}` : 'AI 回答';
     const body = document.createElement('div'); body.textContent = entry.answer || '正在生成…';
@@ -242,6 +242,7 @@ async function startSession() {
     session = { startedAt: new Date().toISOString(), endedAt: null, entries: [] };
     persist(); renderLog(); interviewerBuffer = []; aiSince = 0; aiEpoch++;
     ui['ai-switch'].checked = false;
+    ui['ai-options'].open = false;
     interviewerStartedAt = 0; lastPlaybackAt = 0;
     status('正在连接两路实时语音识别…');
     await Promise.all([openAsr('interviewer'), openAsr('me')]);
@@ -253,7 +254,7 @@ async function startSession() {
     await audioContext.resume();
     displayStream.getVideoTracks().forEach(track => { track.onended = () => { if (running) endSession(); }; });
     running = true; starting = false; buttons();
-    status(`正在记录双方语音。麦克风：${micTrack.label || '默认设备'}。AI 回答默认关闭。`);
+    status(`正在记录双方语音。麦克风：${micTrack.label || '默认设备'}。`);
   } catch (error) {
     await releaseAudio();
     for (const socket of Object.values(sockets)) socket.close(); sockets = {};
@@ -313,7 +314,10 @@ ui.export.onclick = exportSession;
 ui['ai-switch'].onchange = () => {
   aiEpoch++; interviewerBuffer = [];
   if (activeAnswerController) activeAnswerController.abort();
-  aiSince = ui['ai-switch'].checked ? Date.now() : 0;
-  status(ui['ai-switch'].checked ? 'AI 已开启：只回答现在开始的面试官问题。' : 'AI 已关闭：只记录双方语音。');
+  aiSince = running && ui['ai-switch'].checked ? Date.now() : 0;
+  renderLog();
+  status(running
+    ? (ui['ai-switch'].checked ? 'AI 已开启：只回答现在开始的面试官问题。' : 'AI 已关闭：只记录双方语音，答案已隐藏。')
+    : (ui['ai-switch'].checked ? '已显示本次会话的 AI 答案。' : '已隐藏本次会话的 AI 答案。'));
 };
 persist(); renderLog();
