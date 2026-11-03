@@ -7,7 +7,7 @@ let displayStream, microphoneStream, audioContext, audioNodes = [], sockets = {}
 let running = false, starting = false, stopping = false, aiSince = 0, aiEpoch = 0, answerEpoch = 0;
 let assessSince = 0, assessEpoch = 0, sessionEpoch = 0, assessmentSeq = 0;
 let interviewerStartedAt = 0, meStartedAt = 0, interviewerBuffer = [], questionJobs = Promise.resolve(), answerJobs = Promise.resolve(), activeAnswerController;
-let assessmentTimer, assessmentJob = Promise.resolve(), pendingMeEntries = [], activeAssessmentController, questionAnalysisControllers = new Set();
+let assessmentTimer, assessmentJob = Promise.resolve(), pendingMeEntries = [], activeAssessmentController;
 let answerJobById = new Map();
 let lastPlaybackAt = 0;
 let pipWindow = null;
@@ -64,14 +64,6 @@ function renderEntry(entry) {
       sources.textContent = `来源：${entry.sources.map(s => s.title || s.source).join('；')}`;
       box.append(sources);
     }
-    card.append(box);
-  }
-  if (ui['assess-switch'].checked && entry.questionAnalysis) {
-    const analysis = entry.questionAnalysis;
-    const box = assessmentBox('面试官问题分析', analysis.verification_tag);
-    appendLine(box, '考点', analysis.focus);
-    appendPoints(box, '应答要点', analysis.expected_points);
-    appendLine(box, '', analysis.error || (analysis.pending ? '正在分析问题…' : ''));
     card.append(box);
   }
   if (ui['assess-switch'].checked && entry.assessment) {
@@ -132,9 +124,9 @@ async function classifyAndAnswer(entry, generation) {
     response = await fetch('/api/live/question', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: interviewerBuffer.join(' ').slice(-1200) }) });
     if (!response.ok) throw Error('问题判断失败');
     response = await response.json();
-  } catch (error) { if (generation !== sessionEpoch) return; entry.aiState = 'judge_error'; if (entry.assessmentQuestionEligible) entry.questionAnalysis = { error: '问题判断失败' }; persist(); renderLog(); status(error.message, true); return; }
+  } catch (error) { if (generation !== sessionEpoch) return; entry.aiState = 'judge_error'; persist(); renderLog(); status(error.message, true); return; }
   if (generation !== sessionEpoch) return;
-  if (!response.question) { entry.aiState = 'not_question'; delete entry.questionAnalysis; persist(); renderLog(); return; }
+  if (!response.question) { entry.aiState = 'not_question'; persist(); renderLog(); return; }
   interviewerBuffer = [];
   entry.question = response.question;
   if ((entry.aiEligible && ui['ai-switch'].checked && entry.aiEpoch === aiEpoch) ||
@@ -143,37 +135,7 @@ async function classifyAndAnswer(entry, generation) {
     answerJobs = answerJobs.then(() => generateAnswer(entry, answerEpoch));
     answerJobById.set(entry.id, answerJobs);
   }
-  if (entry.assessmentQuestionEligible && ui['assess-switch'].checked && entry.assessEpoch === assessEpoch) {
-    entry.questionAnalysis = { pending: true };
-    analyzeQuestion(entry, generation, entry.assessEpoch, answerJobs);
-  }
   persist(); renderLog();
-}
-
-async function analyzeQuestion(entry, generation, epoch, referenceJob) {
-  const controller = new AbortController(); questionAnalysisControllers.add(controller);
-  const timeout = setTimeout(() => controller.abort(), 90000);
-  try {
-    await referenceJob;
-    if (generation !== sessionEpoch || epoch !== assessEpoch || controller.signal.aborted) return;
-    if (entry.aiState !== 'answered' || !entry.answer) {
-      entry.questionAnalysis = { error: '问题回答未完成，暂无法分析考点' };
-      persist(); renderLog(); return;
-    }
-    const reference = { reference_answer: entry.answer.slice(0, 8000), reference_mode: entry.sourceMode };
-    const response = await fetch('/api/live/analyze-question', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: entry.question, ...reference }), signal: controller.signal
-    });
-    if (!response.ok) throw Error('问题分析请求失败');
-    const result = await response.json();
-    if (generation !== sessionEpoch || epoch !== assessEpoch) return;
-    entry.questionAnalysis = result; persist(); renderLog();
-  } catch (error) {
-    if (generation !== sessionEpoch || epoch !== assessEpoch) return;
-    entry.questionAnalysis = { error: error.name === 'AbortError' ? '问题分析超时' : error.message };
-    persist(); renderLog();
-  } finally { clearTimeout(timeout); questionAnalysisControllers.delete(controller); }
 }
 
 function answerManually(entry) {
@@ -186,10 +148,6 @@ function answerManually(entry) {
   const epoch = answerEpoch;
   answerJobs = answerJobs.then(() => generateAnswer(entry, epoch));
   answerJobById.set(entry.id, answerJobs);
-  if (ui['assess-switch'].checked && entry.assessmentQuestionEligible && entry.assessEpoch === assessEpoch) {
-    entry.questionAnalysis = { pending: true };
-    analyzeQuestion(entry, sessionEpoch, assessEpoch, answerJobs);
-  }
 }
 
 async function generateAnswer(entry, epoch) {
@@ -294,11 +252,9 @@ async function assessPendingAnswers() {
   target.assessment = { pending: true }; persist(); renderLog();
   const timeout = setTimeout(() => controller.abort(), 90000);
   try {
-    const reference = questionEntry.questionAnalysis?.reference_answer
-      ? { reference_answer: questionEntry.questionAnalysis.reference_answer.slice(0, 8000), reference_mode: questionEntry.questionAnalysis.reference_mode }
-      : questionEntry.aiState === 'answered' && questionEntry.answer
-        ? { reference_answer: questionEntry.answer.slice(0, 8000), reference_mode: questionEntry.sourceMode }
-        : {};
+    const reference = questionEntry.aiState === 'answered' && questionEntry.answer
+      ? { reference_answer: questionEntry.answer.slice(0, 8000), reference_mode: questionEntry.sourceMode }
+      : {};
     const response = await fetch('/api/live/assess', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: questionEntry.question, answer, ...reference }), signal: controller.signal
@@ -402,8 +358,6 @@ async function startSession() {
     sessionEpoch++; aiEpoch++; assessEpoch++; answerEpoch++; assessmentSeq++;
     clearTimeout(assessmentTimer); pendingMeEntries = [];
     activeAnswerController?.abort(); activeAssessmentController?.abort();
-    for (const controller of questionAnalysisControllers) controller.abort();
-    questionAnalysisControllers.clear();
     persist(); renderLog(); interviewerBuffer = []; aiSince = 0; assessSince = 0;
     questionJobs = Promise.resolve(); answerJobs = Promise.resolve();
     assessmentJob = Promise.resolve();
@@ -455,12 +409,6 @@ function exportSession() {
     lines.push(`## ${clock(entry.at)} ${entry.role === 'me' ? '我' : '面试官'}`, '', entry.text, '');
     if (entry.question) lines.push(`**识别问题：** ${entry.question}`, '');
     if (entry.answer !== undefined) lines.push(`**AI 回答：** ${entry.answer || '未完成'}`, '');
-    if (entry.questionAnalysis && !entry.questionAnalysis.pending) {
-      const analysis = entry.questionAnalysis;
-      if (analysis.focus) lines.push(`**面试官问题考点：** ${analysis.focus}`, '');
-      if (analysis.expected_points?.length) lines.push('**应答要点：**', ...analysis.expected_points.map(point => `- ${point}`), '');
-      if (analysis.verification_tag) lines.push(`**分析标识：** ${analysis.verification_tag}`, '');
-    }
     if (entry.assessment && !entry.assessment.pending) {
       const review = entry.assessment;
       if (review.verdict) lines.push(`**我的回答判断：** ${review.verdict}`, '');
@@ -505,7 +453,7 @@ ui['ai-switch'].onchange = () => {
   aiSince = running && ui['ai-switch'].checked ? Date.now() : 0;
   renderLog();
   status(running
-    ? (ui['ai-switch'].checked ? 'AI 回答已开启：回答新听到的面试官问题。' : ui['assess-switch'].checked ? 'AI 回答单独开关已关闭；双向分析仍会回答面试官问题。' : 'AI 回答已关闭：答案已隐藏，继续记录双方语音。')
+    ? (ui['ai-switch'].checked ? 'AI 回答已开启：回答新听到的面试官问题。' : ui['assess-switch'].checked ? 'AI 回答单独开关已关闭；“回答与评价”仍会回答面试官问题。' : 'AI 回答已关闭：答案已隐藏，继续记录双方语音。')
     : (answerVisible() ? '已显示本次会话的 AI 答案。' : '已隐藏本次会话的 AI 答案。'));
 };
 ui['assess-switch'].onchange = () => {
@@ -513,11 +461,8 @@ ui['assess-switch'].onchange = () => {
   clearTimeout(assessmentTimer); pendingMeEntries = [];
   activeAssessmentController?.abort();
   if (!answerVisible()) { answerEpoch++; activeAnswerController?.abort(); }
-  for (const controller of questionAnalysisControllers) controller.abort();
-  questionAnalysisControllers.clear();
   if (!ui['assess-switch'].checked) {
     for (const entry of session.entries) {
-      if (entry.questionAnalysis?.pending) delete entry.questionAnalysis;
       if (entry.assessment?.pending) delete entry.assessment;
     }
     persist();
@@ -525,7 +470,7 @@ ui['assess-switch'].onchange = () => {
   assessSince = running && ui['assess-switch'].checked ? Date.now() : 0;
   renderLog();
   status(running
-    ? (ui['assess-switch'].checked ? '双向分析已开启：回答新听到的面试官问题，并评价、补充你随后说出的回答。' : '双向分析已关闭：分析内容已隐藏，继续记录双方语音。')
-    : (ui['assess-switch'].checked ? '已显示本次会话的双向分析。' : '已隐藏本次会话的双向分析。'));
+    ? (ui['assess-switch'].checked ? '回答与评价已开启：回答新听到的面试官问题，并评价、补充你随后说出的回答。' : '回答与评价已关闭：评价内容已隐藏，继续记录双方语音。')
+    : (ui['assess-switch'].checked ? '已显示本次会话的回答评价。' : '已隐藏本次会话的回答评价。'));
 };
 persist(); renderLog();

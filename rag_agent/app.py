@@ -42,12 +42,6 @@ class InterviewAnswer(BaseModel):
     reference_mode: str | None = None
 
 
-class InterviewQuestion(BaseModel):
-    question: str = Field(min_length=1, max_length=1200)
-    reference_answer: str | None = Field(default=None, max_length=8000)
-    reference_mode: str | None = None
-
-
 @app.get("/")
 async def home():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
@@ -100,16 +94,6 @@ async def live_assess(payload: InterviewAnswer):
         raise HTTPException(503, str(exc)) from exc
     except (APITimeoutError, APIConnectionError) as exc:
         raise HTTPException(503, "回答分析暂时无响应") from exc
-
-
-@app.post("/api/live/analyze-question")
-async def live_analyze_question(payload: InterviewQuestion):
-    try:
-        return await engine.analyze_interview_question(payload.question, payload.reference_answer, payload.reference_mode)
-    except RuntimeError as exc:
-        raise HTTPException(503, str(exc)) from exc
-    except (APITimeoutError, APIConnectionError) as exc:
-        raise HTTPException(503, "面试问题分析暂时无响应") from exc
 
 
 @app.post("/api/ask/stream")

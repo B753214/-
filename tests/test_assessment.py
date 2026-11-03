@@ -46,23 +46,3 @@ def test_assessment_never_runs_second_retrieval_without_reference():
     result = asyncio.run(engine.assess_interview_answer("How does Redis persist data?", "Only RDB snapshots."))
     assert result["verification_tag"] == "Model assessment · Unverified"
     assert result["reference_sources"] == []
-
-
-def test_interviewer_question_analysis_reuses_retrieved_answer():
-    engine = Engine(replace(Settings(), openai_key="test"))
-
-    async def no_lookup(_):
-        raise AssertionError("question analysis must reuse the interviewer answer")
-
-    async def fake_create(**_):
-        result = {"focus": "Persistence tradeoffs", "expected_points": ["RDB", "AOF", "Recovery"]}
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(result)))])
-
-    engine._interview_reference = no_lookup
-    engine.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
-    result = asyncio.run(engine.analyze_interview_question("How does Redis persist data?",
-        "Redis supports RDB snapshots and AOF logs.", "knowledge_base"))
-    assert result["focus"] == "Persistence tradeoffs"
-    assert result["expected_points"] == ["RDB", "AOF", "Recovery"]
-    assert result["reference_mode"] == "knowledge_base"
-    assert result["verification_tag"] == "Evidence-based analysis"
