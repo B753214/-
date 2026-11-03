@@ -13,7 +13,7 @@ from llama_index.core import Document, StorageContext, VectorStoreIndex, load_in
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.openai import OpenAIEmbedding
 from openai import AsyncOpenAI
-from rank_bm25 import BM25Okapi
+from . import bm25_store
 from .config import Settings
 from .notion import PAGE_ID, page_title, read_pages
 from .retrieval import Hit, conversational_answer, fuse_rrf, language_of, relevant, tokens
@@ -41,13 +41,23 @@ class Engine:
         if not (self.config.index_dir / "docstore.json").exists():
             return False
         storage = StorageContext.from_defaults(persist_dir=str(self.config.index_dir))
-        self.index = load_index_from_storage(storage, embed_model=self._embed())
-        self.nodes = list(self.index.docstore.docs.values())
-        self._build_bm25()
+        index = load_index_from_storage(storage, embed_model=self._embed())
+        nodes = list(index.docstore.docs.values())
+        bm25 = bm25_store.load(self.config.index_dir, nodes) if self.config.bm25_enabled else None
+        self.index, self.nodes, self.bm25 = index, nodes, bm25
         return True
 
-    def _build_bm25(self):
-        self.bm25 = BM25Okapi([tokens(node.text) or ["_"] for node in self.nodes]) if self.nodes and self.config.bm25_enabled else None
+    def prepare_existing_index(self) -> dict:
+        """One-time offline migration for an index created before BM25 persistence."""
+        if not (self.config.index_dir / "docstore.json").exists():
+            raise RuntimeError("没有已有索引；请运行 python -m rag_agent.ingest")
+        storage = StorageContext.from_defaults(persist_dir=str(self.config.index_dir))
+        index = load_index_from_storage(storage, embed_model=self._embed())
+        nodes = list(index.docstore.docs.values())
+        if not nodes:
+            raise RuntimeError("已有索引没有文档分块；请重新导入文档")
+        bm25_store.save(self.config.index_dir, nodes, bm25_store.build(nodes))
+        return {"chunks": len(nodes), "bm25_file": str(self.config.index_dir / bm25_store.FILENAME)}
 
     async def rebuild(self) -> dict:
         if not self.config.openai_key:
@@ -68,8 +78,10 @@ class Engine:
         index = await asyncio.to_thread(VectorStoreIndex, nodes, embed_model=self._embed(), show_progress=False)
         self.config.index_dir.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(index.storage_context.persist, persist_dir=str(self.config.index_dir))
-        self.index, self.nodes = index, nodes
-        self._build_bm25()
+        stored_nodes = list(index.docstore.docs.values())
+        bm25 = await asyncio.to_thread(bm25_store.build, stored_nodes)
+        await asyncio.to_thread(bm25_store.save, self.config.index_dir, stored_nodes, bm25)
+        self.index, self.nodes, self.bm25 = index, stored_nodes, bm25 if self.config.bm25_enabled else None
         return {"documents": len(documents), "chunks": len(nodes)}
 
     def _bm25_hits(self, query: str) -> list[Hit]:

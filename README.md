@@ -32,7 +32,7 @@ NOTION_PAGE_IDS=24fa020ef1cf80b68685fcfade70e314
 
 如果只用 PDF，可将 `NOTION_PAGE_IDS` 留空。默认回答模型为 `qwen3.7-max`，路由模型为 `qwen-flash`，重排模型为 `qwen3.7-flash`，向量模型为 `text-embedding-v4`，音频模型为 `qwen3-asr-flash`。DashScope 的文本模型调用默认关闭思考模式以缩短等待时间；其他兼容服务不额外传此参数。问答页使用流式回答，长答案会逐步显示；模型请求 30 秒超时，页面会显示超时提示。默认地址是 DashScope 北京兼容接口；使用其他区域或兼容服务时，调整 `.env` 中的模型和地址。切换 embedding 模型后必须重新建索引。
 
-先导入文档，再启动问答服务：
+先离线导入文档，再启动问答服务。导入命令会抓取 Notion、读取 PDF、按来源切分文档、调用云端向量模型生成 embedding，并把分块、向量索引和 BM25 统计结果保存到 `data/index/`：
 
 ```powershell
 python -m rag_agent.ingest
@@ -55,9 +55,18 @@ uvicorn rag_agent.app:app --host 127.0.0.1 --port 8000
 
 实时识别使用两路 `qwen3-asr-flash-realtime` WebSocket，会产生语音模型用量。可通过 `LIVE_ASR_WS_URL` 指向所在业务空间的实时 WebSocket 地址，`LIVE_ASR_MODEL` 设置模型名。密钥仍只保存在服务端 `.env`，不会发送给浏览器。建议使用耳机：会议音频仍从共享来源的数字音轨采集，耳机能避免播放声音再次进入麦克风。页面默认开启“防串音”，面试官说话时会暂停麦克风转写；如果需要记录双方同时说话，请关闭该开关。浏览器也会尝试启用更强的麦克风回声消除，但效果取决于设备和浏览器。
 
-**启动服务只加载已有索引，不会重新读取文档。** Notion 或 PDF 内容变更后，再运行 `python -m rag_agent.ingest`，随后重启服务。目前每次导入都会全量重建索引。
+**启动服务只从磁盘加载已处理的分块、向量索引和 BM25 统计结果。** 启动时不会连接 Notion、解析 PDF、重新切分文档、重新生成 embedding 或重新为分块分词。问答时仍需调用云端模型生成问题向量、判断路由、可选重排和回答。Notion 或 PDF 内容变更后，运行 `python -m rag_agent.ingest` 全量重建，再重启服务加载新索引；仅修改 `.env` 不会自动更新文档。
 
 ## 添加知识库文档
+
+目前没有网页上传入口。文档由服务端离线导入，操作如下：
+
+1. **上传 PDF**：把文件复制到项目根目录的 `data/pdfs/`。例如在 PowerShell 中运行 `Copy-Item "C:\路径\你的文档.pdf" .\data\pdfs\`。只扫描该目录下的 `.pdf` 文件，不扫描子目录；扫描版 PDF 需先做 OCR。
+2. **添加 Notion**：在项目根目录的 `.env` 中，把页面链接末尾的 32 位页面 ID 添加到 `NOTION_PAGE_IDS`，多个 ID 用英文逗号分隔。需要导入整个栏目时填父页面 ID，并保持 `NOTION_INCLUDE_SUBPAGES=true`；页面需属于已经授权的工作区。
+3. **处理并保存**：在项目根目录运行 `python -m rag_agent.ingest`。命令结束并显示 `documents`、`chunks` 后，处理结果已写入 `data/index/`。导入失败时先检查错误，不能只重启服务。
+4. **让问答生效**：首次导入后启动服务；运行中的服务则在导入完成后重启。打开 `/health` 检查 `ready: true` 和 `chunks` 数量。
+
+每次执行导入命令都会按当前 `.env` 中的 Notion 页面和 `data/pdfs/` 中的 PDF **全量重建**。新增、修改或删除文档后都要重新执行；网页问答和服务启动不会自动抓取新文档。若只需要把旧索引转换为新版 BM25 格式，使用下文的 `--prepare-existing-index`，它不读取源文档。
 
 在问题中明确写“我的知识库”“这份文档”“根据我的 Notion 文档”等，会选择本地知识库。普通稳定概念不会自动查知识库；若希望按内部文档回答，请在问题中点明文档或提供 Notion 页面链接。
 
@@ -81,7 +90,13 @@ NOTION_MAX_PAGES=1000
 
 ### 索引存储
 
-导入后，向量索引保存在 `data/index/`；BM25 在服务启动加载索引时于内存中建立。`data/index/`、`data/pdfs/` 和 `.env` 均被 Git 忽略，不随代码推送。换电脑或重新部署时，需要提供文档、配置和授权，再运行导入。
+导入后，LlamaIndex 的文档分块、来源信息和向量索引，以及预计算的 `bm25.json` 都保存在 `data/index/`。服务启动时只反序列化这些文件。旧版本已经生成 `data/index/`，但还没有 `bm25.json` 时，可以运行以下一次性离线迁移命令；它只读取已有索引，不重新连接 Notion、读取 PDF 或调用 embedding API：
+
+```powershell
+python -m rag_agent.ingest --prepare-existing-index
+```
+
+`data/index/`、`data/pdfs/` 和 `.env` 均被 Git 忽略，不随代码推送。换电脑或重新部署时，需要提供文档、配置和授权，再运行导入；或者复制可信的已构建索引目录，并保持 embedding 模型配置一致。
 
 ## 项目结构
 
@@ -91,7 +106,8 @@ agent/
 │  ├─ app.py             # FastAPI、问答页、健康检查和接口
 │  ├─ config.py          # 读取 .env 和默认配置
 │  ├─ engine.py          # 文档切块、建索引、检索、回答和音频转写
-│  ├─ ingest.py          # 手动执行全量导入的入口
+│  ├─ ingest.py          # 离线全量导入及已有索引迁移入口
+│  ├─ bm25_store.py      # 离线 BM25 构建、保存和加载
 │  ├─ live_audio.py      # 两路实时语音识别的 WebSocket 桥接
 │  ├─ notion.py          # Notion MCP 读取及子页面遍历
 │  ├─ retrieval.py       # 分词、RRF、语言和相关性判断
@@ -99,7 +115,7 @@ agent/
 │  └─ static/            # 问答页和通话悬浮窗界面
 ├─ data/
 │  ├─ pdfs/             # 待导入的 PDF
-│  └─ index/            # 生成的本地索引
+│  └─ index/            # 已处理分块、向量和 BM25 索引
 ├─ tests/                # 检索、Notion 和音频测试
 ├─ .env.example          # 配置示例；复制成 .env 后填写密钥
 ├─ requirements.txt      # Python 依赖
@@ -145,7 +161,7 @@ python -m pytest -q
 
 ## 常见问题
 
-- **页面打开后提示没有索引**：先运行 `python -m rag_agent.ingest`，再启动服务。
+- **页面打开后提示没有索引**：先运行 `python -m rag_agent.ingest`，再启动服务。已有旧索引但缺少 BM25 文件时，运行 `python -m rag_agent.ingest --prepare-existing-index` 后重启。
 - **新增页面后仍检索不到**：确认页面属于已授权的工作区、`NOTION_PAGE_IDS` 已更新；重新导入并重启服务。
 - **Notion 授权失败**：检查 Node.js 与 `npx`、工作区访问权限，以及 `.env` 中的 MCP 配置。可先运行 `python -m rag_agent.tools` 验证连接。
 - **扫描版 PDF 没有内容**：先用 OCR 生成可选中文字的 PDF。

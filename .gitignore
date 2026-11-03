@@ -3,6 +3,7 @@
 .vendor/
 __pycache__/
 .pytest_cache/
+.pytest_run/
 data/index/
 data/pdfs/*
 !data/pdfs/.gitkeep
