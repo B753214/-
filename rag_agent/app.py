@@ -1,16 +1,25 @@
 import asyncio
 import json
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile, WebSocket
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import APIConnectionError, APITimeoutError
 from pydantic import BaseModel, Field
 from .engine import Engine
 from .live_audio import relay_audio
+from .overlay_state import OverlaySnapshot, current as overlay_current, update as overlay_update
 
 engine = Engine()
+_overlay_process: subprocess.Popen | None = None
+
+
+def check_overlay_request(value: str | None) -> None:
+    if value != "atlas-live":
+        raise HTTPException(403, "仅允许本地通话页访问")
 
 
 @asynccontextmanager
@@ -55,6 +64,39 @@ async def live_page():
 @app.get("/health")
 async def health():
     return {"ready": engine.index is not None, "chunks": len(engine.nodes), "bm25": engine.config.bm25_enabled, "rerank": engine.config.rerank_enabled}
+
+
+@app.get("/api/live/overlay/state")
+async def overlay_state(x_atlas_overlay: str | None = Header(default=None)):
+    check_overlay_request(x_atlas_overlay)
+    return overlay_current()
+
+
+@app.post("/api/live/overlay/state")
+async def publish_overlay(snapshot: OverlaySnapshot, x_atlas_overlay: str | None = Header(default=None)):
+    check_overlay_request(x_atlas_overlay)
+    overlay_update(snapshot)
+    return {"ok": True}
+
+
+@app.post("/api/live/overlay/open")
+async def open_overlay(x_atlas_overlay: str | None = Header(default=None)):
+    check_overlay_request(x_atlas_overlay)
+    if sys.platform != "win32":
+        raise HTTPException(501, "原生浮窗目前仅支持 Windows")
+    global _overlay_process
+    if _overlay_process is not None and _overlay_process.poll() is None:
+        return {"started": False, "pid": _overlay_process.pid}
+    try:
+        _overlay_process = subprocess.Popen(
+            [sys.executable, "-m", "rag_agent.overlay_window"],
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except OSError as exc:
+        raise HTTPException(503, "无法启动 Windows 原生浮窗") from exc
+    return {"started": True, "pid": _overlay_process.pid}
 
 
 @app.post("/api/ask")

@@ -1,4 +1,4 @@
-const ui = Object.fromEntries(['live-panel','panel-mount','start','end','float','export','ai-options','ai-switch','assess-switch','bleed-switch','session-state','status','interviewer-preview','me-preview','count','log'].map(id => [id, document.getElementById(id)]));
+const ui = Object.fromEntries(['live-panel','panel-mount','start','end','float','native-float','export','ai-options','ai-switch','assess-switch','bleed-switch','session-state','status','interviewer-preview','me-preview','count','log'].map(id => [id, document.getElementById(id)]));
 const storeKey = 'atlas-live-session';
 let session = { startedAt: null, endedAt: null, entries: [] };
 try { session = JSON.parse(sessionStorage.getItem(storeKey)) || session; } catch {}
@@ -11,11 +11,13 @@ let assessmentTimer, assessmentJob = Promise.resolve(), pendingMeEntries = [], a
 let answerJobById = new Map();
 let lastPlaybackAt = 0;
 let pipWindow = null;
+let overlayTimer;
+let overlayPublishJob = Promise.resolve();
 
 const clock = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 const answerVisible = () => ui['ai-switch'].checked || ui['assess-switch'].checked;
 function persist() { sessionStorage.setItem(storeKey, JSON.stringify(session)); }
-function status(text, error = false) { ui.status.textContent = text; ui.status.classList.toggle('error', error); }
+function status(text, error = false) { ui.status.textContent = text; ui.status.classList.toggle('error', error); scheduleOverlayPublish(); }
 function buttons() {
   ui.start.disabled = running || starting || stopping;
   ui.end.disabled = !running;
@@ -106,6 +108,44 @@ function renderLog() {
   if (!session.entries.length) { const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = '会话记录会显示在这里。'; ui.log.append(empty); }
   else session.entries.forEach(entry => ui.log.append(renderEntry(entry)));
   buttons();
+  scheduleOverlayPublish();
+}
+
+function overlaySnapshot() {
+  const verdicts = { correct: '正确', partial: '部分正确', incorrect: '需要纠正', uncertain: '暂无法判断' };
+  const entries = session.entries.slice(-12).map(entry => {
+    const item = { role: entry.role, text: entry.text.slice(0, 1500), at: entry.at };
+    if (answerVisible() && entry.answer !== undefined) {
+      item.answer = entry.answer.slice(0, 8000);
+      if (entry.sourceMode === 'model_fallback') item.answer_tag = entry.answerTag || '模型经验回答 · 未经资料核实';
+    }
+    if (ui['assess-switch'].checked && entry.assessment) {
+      const review = entry.assessment;
+      const lines = [];
+      if (review.verdict) lines.push(`判断：${verdicts[review.verdict] || review.verdict}`);
+      for (const [label, value] of [['正确性', review.correctness], ['完整度', review.completeness], ['说明', review.explanation], ['补充回答', review.supplement]]) {
+        if (value) lines.push(`${label}：${value}`);
+      }
+      if (review.missing_points?.length) lines.push(`遗漏要点：${review.missing_points.join('；')}`);
+      if (review.verification_tag) lines.push(review.verification_tag);
+      if (review.error || review.pending) lines.push(review.error || '正在分析回答…');
+      item.assessment = lines.join('\n').slice(0, 3000);
+    }
+    return item;
+  });
+  return { running, status: ui.status.textContent.slice(0, 400),
+    interviewer_preview: ui['interviewer-preview'].textContent.slice(0, 500),
+    me_preview: ui['me-preview'].textContent.slice(0, 500), entries };
+}
+
+function scheduleOverlayPublish() {
+  clearTimeout(overlayTimer);
+  overlayTimer = setTimeout(() => {
+    overlayPublishJob = overlayPublishJob.then(() => fetch('/api/live/overlay/state', { method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Atlas-Overlay': 'atlas-live' },
+        body: JSON.stringify(overlaySnapshot()), keepalive: true }))
+      .catch(() => { /* The live page can still run without the optional native overlay. */ });
+  }, 120);
 }
 function addTranscript(role, text) {
   if (!text.trim()) return null;
@@ -186,6 +226,7 @@ async function generateAnswer(entry, epoch) {
 function onAsrEvent(role, event) {
   if (event.type === 'partial') {
     ui[`${role}-preview`].textContent = event.text || '识别中…';
+    scheduleOverlayPublish();
     if (role === 'interviewer' && !interviewerStartedAt) interviewerStartedAt = Date.now();
     if (role === 'me' && !meStartedAt) meStartedAt = Date.now();
     return;
@@ -198,6 +239,7 @@ function onAsrEvent(role, event) {
   if (event.type === 'error') { status(`${role === 'me' ? '麦克风' : '面试官'}识别失败：${event.message}`, true); if (running) endSession(); return; }
   if (event.type !== 'transcript') return;
   ui[`${role}-preview`].textContent = event.text || '等待语音…';
+  scheduleOverlayPublish();
   const entry = addTranscript(role, event.text || '');
   if (role === 'interviewer' && entry) {
     const beganAt = interviewerStartedAt || Date.now();
@@ -443,9 +485,20 @@ async function toggleFloat() {
   } catch (error) { status(`无法打开悬浮窗：${error.message}`, true); }
 }
 
+async function openNativeFloat() {
+  if (!navigator.platform?.startsWith('Win')) { status('原生浮窗目前仅支持 Windows。', true); return; }
+  scheduleOverlayPublish();
+  try {
+    const response = await fetch('/api/live/overlay/open', { method: 'POST', headers: { 'X-Atlas-Overlay': 'atlas-live' } });
+    if (!response.ok) throw Error((await response.json()).detail || '启动失败');
+    status('Windows 原生浮窗已打开。通话页请保持打开，浮窗可直接拖动和滚动。');
+  } catch (error) { status(`无法打开原生浮窗：${error.message}`, true); }
+}
+
 ui.start.onclick = startSession;
 ui.end.onclick = endSession;
 ui.float.onclick = toggleFloat;
+ui['native-float'].onclick = openNativeFloat;
 ui.export.onclick = exportSession;
 ui['ai-switch'].onchange = () => {
   aiEpoch++; interviewerBuffer = [];
@@ -474,3 +527,4 @@ ui['assess-switch'].onchange = () => {
     : (ui['assess-switch'].checked ? '已显示本次会话的回答评价。' : '已隐藏本次会话的回答评价。'));
 };
 persist(); renderLog();
+setInterval(scheduleOverlayPublish, 3000);
