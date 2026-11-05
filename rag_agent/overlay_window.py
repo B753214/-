@@ -6,11 +6,13 @@ import queue
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from ctypes import wintypes
 from urllib.request import Request, urlopen
 
 
 STATE_URL = "http://127.0.0.1:8000/api/live/overlay/state"
+LIVE_URL = "http://127.0.0.1:8000/live"
 WS_EX_NOACTIVATE = 0x08000000
 GWL_EXSTYLE = -20
 GWL_WNDPROC = -4
@@ -88,7 +90,7 @@ class OverlayWindow:
         self.user32 = ctypes.windll.user32
         self.events: queue.SimpleQueue = queue.SimpleQueue()
         self.stop_event = threading.Event()
-        self.snapshot = {"running": False, "status": "连接本地服务中…", "entries": [],
+        self.snapshot = {"running": False, "status": "请在通话网页点击「开始会话」", "entries": [],
                          "interviewer_preview": "", "me_preview": ""}
         self.updated_at = ""
         self.drag_state = None
@@ -137,11 +139,20 @@ class OverlayWindow:
                                 font=("Microsoft YaHei UI", 13, "bold"))
         self.header.create_text(width - 30, 8, text="×", anchor="nw", fill="white",
                                 font=("Microsoft YaHei UI", 17))
-        state = "录制中" if self.snapshot.get("running") else "待命"
+        running = self.snapshot.get("running")
+        state = "录制中" if running else "等待网页开始会话"
         canvas.create_rectangle(10, 10, width - 10, 64, fill="white", outline="#e1e8f2")
         self.text(20, 17, state, width - 40, color="#2d68dc", size=10, weight="bold")
         self.text(20, 36, self.snapshot.get("status", "")[:160], width - 40, color="#667892", size=9)
         y = 76
+        if not running:
+            canvas.create_rectangle(10, y, width - 10, y + 40, fill="#4167e8", outline="", tags="open_live")
+            canvas.create_text(20, y + 10, text="打开通话页 → 点击「开始会话」", anchor="nw",
+                               fill="white", font=("Microsoft YaHei UI", 10, "bold"), tags="open_live")
+            canvas.tag_bind("open_live", "<Button-1>", lambda _: webbrowser.open(LIVE_URL))
+            self.text(14, y + 48, "已有通话页可直接切回；在网页授权共享音频和麦克风。",
+                      width - 28, color="#667892", size=9)
+            y += 78
         for role, title in (("interviewer", "面试官 · 电脑声音"), ("me", "我 · 麦克风")):
             preview = self.snapshot.get(f"{role}_preview", "") or "等待语音…"
             canvas.create_rectangle(10, y, width - 10, y + 58, fill="#f9fbff", outline="#dfe7f2")
