@@ -23,6 +23,24 @@ SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 GA_ROOT = 2
+ERROR_ALREADY_EXISTS = 183
+OVERLAY_MUTEX = "Local\\AtlasNativeOverlay"
+
+
+def single_instance_mutex():
+    """Allow one overlay per Windows login session, including manual launches."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateMutexW(None, False, OVERLAY_MUTEX)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return None, kernel32
+    return handle, kernel32
 
 
 def install_no_activate(root: tk.Tk):
@@ -230,15 +248,23 @@ class OverlayWindow:
 def main():
     if sys.platform != "win32":
         raise SystemExit("原生浮窗目前仅支持 Windows")
-    window = OverlayWindow()
-    if "--self-test" in sys.argv:
-        style = window.user32.GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE)
-        result = window.user32.SendMessageW(window.hwnd, WM_MOUSEACTIVATE, 0, 0)
-        print(json.dumps({"no_activate_style": bool(style & WS_EX_NOACTIVATE),
-                          "mouse_click_keeps_focus": result == MA_NOACTIVATE}))
-        window.close()
-    else:
-        window.run()
+    self_test = "--self-test" in sys.argv
+    mutex, kernel32 = (None, None) if self_test else single_instance_mutex()
+    if not self_test and mutex is None:
+        return
+    try:
+        window = OverlayWindow()
+        if self_test:
+            style = window.user32.GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE)
+            result = window.user32.SendMessageW(window.hwnd, WM_MOUSEACTIVATE, 0, 0)
+            print(json.dumps({"no_activate_style": bool(style & WS_EX_NOACTIVATE),
+                              "mouse_click_keeps_focus": result == MA_NOACTIVATE}))
+            window.close()
+        else:
+            window.run()
+    finally:
+        if mutex is not None:
+            kernel32.CloseHandle(mutex)
 
 
 if __name__ == "__main__":
