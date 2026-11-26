@@ -481,7 +481,7 @@ async function toggleFloat() {
     pipWindow.document.body.className = 'pip-body';
     pipWindow.document.body.append(ui['live-panel']);
     ui.float.textContent = '返回页面';
-    pipWindow.addEventListener('pagehide', () => { ui['panel-mount'].append(ui['live-panel']); pipWindow = null; ui.float.textContent = '悬浮小窗'; });
+    pipWindow.addEventListener('pagehide', () => { ui['panel-mount'].append(ui['live-panel']); pipWindow = null; ui.float.textContent = '浏览器画中画'; });
   } catch (error) { status(`无法打开悬浮窗：${error.message}`, true); }
 }
 
