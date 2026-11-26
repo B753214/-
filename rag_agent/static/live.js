@@ -43,9 +43,9 @@ function renderEntry(entry) {
   card.append(head, text);
   if (entry.role === 'interviewer' && (entry.aiEligible || entry.assessmentQuestionEligible) && answerVisible() && entry.aiState) {
     const decision = document.createElement('div'); decision.className = 'source-line';
-    decision.textContent = ({ ai_off: '仅记录 · AI 已关闭', pre_switch: '仅记录 · 这段话在 AI 开启前开始', judging: '正在判断是否为面试问题…', not_question: '未识别为问题', judge_error: '问题判断失败', answer_error: '回答失败', queued: '已识别为问题 · 等待回答', answering: '正在生成回答…', answered: '已回答', stopped: 'AI 回答已停止' })[entry.aiState] || '';
+    decision.textContent = ({ ai_off: '仅记录 · AI 已关闭', pre_switch: '仅记录 · 这段话在 AI 开启前开始', judging: '正在判断是否为面试问题…', not_question: '未识别为问题', model_unavailable: '模型额度或权限不足，暂时无法自动回答', answer_error: '回答失败', queued: '已识别为问题 · 等待回答', answering: '正在生成回答…', answered: '已回答', stopped: 'AI 回答已停止' })[entry.aiState] || '';
     card.append(decision);
-    if (!entry.question && answerVisible() && ['not_question','judge_error'].includes(entry.aiState)) {
+    if (!entry.question && answerVisible() && entry.aiState === 'not_question') {
       const manual = document.createElement('button'); manual.type = 'button'; manual.className = 'manual-answer';
       manual.textContent = '按这段话回答'; manual.onclick = () => answerManually(entry);
       card.append(manual);
@@ -185,9 +185,20 @@ async function classifyAndAnswer(entry, generation) {
   let response;
   try {
     response = await fetch('/api/live/question', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: interviewerBuffer.join(' ').slice(-1200) }) });
-    if (!response.ok) throw Error('问题判断失败');
+    if (!response.ok) {
+      const detail = (await response.json().catch(() => ({}))).detail || '问题判断暂时失败';
+      const error = Error(detail); error.modelUnavailable = /额度已用尽|模型权限|账户额度/.test(detail);
+      throw error;
+    }
     response = await response.json();
-  } catch (error) { if (generation !== sessionEpoch) return; entry.aiState = 'judge_error'; persist(); renderLog(); status(error.message, true); return; }
+  } catch (error) {
+    if (generation !== sessionEpoch) return;
+    if (error.modelUnavailable) {
+      entry.aiState = 'model_unavailable'; persist(); renderLog(); status(error.message, true); return;
+    }
+    response = { question: interviewerBuffer.join(' ').slice(-1200) };
+    status('问题判断暂时失败，正按原始转写自动尝试回答。', true);
+  }
   if (generation !== sessionEpoch) return;
   if (!response.question) { entry.aiState = 'not_question'; persist(); renderLog(); return; }
   interviewerBuffer = [];

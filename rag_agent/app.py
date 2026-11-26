@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile, WebSocket
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from openai import APIConnectionError, APITimeoutError
+from openai import APIConnectionError, APITimeoutError, PermissionDeniedError
 from pydantic import BaseModel, Field
 from .engine import Engine
 from .live_audio import relay_audio
@@ -15,6 +15,13 @@ from .overlay_state import OverlaySnapshot, current as overlay_current, update a
 
 engine = Engine()
 _overlay_process: subprocess.Popen | None = None
+
+
+def model_permission_message(exc: PermissionDeniedError) -> str:
+    body = exc.body if isinstance(exc.body, dict) else {}
+    if body.get("code") == "AllocationQuota.FreeTierOnly":
+        return "DashScope 免费额度已用尽，请配置有可用额度的模型账户后重试"
+    return "云端模型拒绝请求，请检查模型权限和账户额度"
 
 
 def check_overlay_request(value: str | None) -> None:
@@ -125,6 +132,8 @@ async def open_overlay(x_atlas_overlay: str | None = Header(default=None)):
 async def ask(payload: Question):
     try:
         return await engine.ask(payload.question)
+    except PermissionDeniedError as exc:
+        raise HTTPException(503, model_permission_message(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
@@ -145,6 +154,8 @@ async def live_asr(socket: WebSocket, role: str):
 async def live_question(payload: InterviewSpeech):
     try:
         return {"question": await engine.interview_question(payload.text)}
+    except PermissionDeniedError as exc:
+        raise HTTPException(503, model_permission_message(exc)) from exc
     except (APITimeoutError, APIConnectionError) as exc:
         raise HTTPException(503, "问题判断暂时无响应") from exc
 
@@ -156,6 +167,8 @@ async def live_assess(payload: InterviewAnswer):
                                                     payload.reference_answer, payload.reference_mode)
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
+    except PermissionDeniedError as exc:
+        raise HTTPException(503, model_permission_message(exc)) from exc
     except (APITimeoutError, APIConnectionError) as exc:
         raise HTTPException(503, "回答分析暂时无响应") from exc
 
@@ -177,6 +190,8 @@ async def ask_stream(payload: Question):
                 await queue.put({"type": "done", "result": result})
             except (ValueError, RuntimeError) as exc:
                 await queue.put({"type": "error", "message": str(exc)})
+            except PermissionDeniedError as exc:
+                await queue.put({"type": "error", "message": model_permission_message(exc)})
             except (APITimeoutError, APIConnectionError):
                 await queue.put({"type": "error", "message": "云端模型暂时无响应，请稍后重试"})
             except Exception:

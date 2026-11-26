@@ -4,6 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from rag_agent.config import Settings
+from rag_agent.app import model_permission_message
 from rag_agent.engine import Engine
 from rag_agent.live_audio import asr_url, public_asr_event
 
@@ -13,6 +14,12 @@ def test_realtime_events_preserve_turn_boundaries_and_final_text():
     assert public_asr_event('{"type":"conversation.item.input_audio_transcription.text","text":"你能","stash":"说说"}') == {"type": "partial", "text": "你能说说"}
     assert public_asr_event('{"type":"conversation.item.input_audio_transcription.completed","transcript":" 你能说说 Webpack 吗？ "}') == {"type": "transcript", "text": "你能说说 Webpack 吗？"}
     assert public_asr_event('{"type":"session.updated"}') is None
+
+
+def test_free_tier_quota_error_is_explained_without_revealing_credentials():
+    message = model_permission_message(SimpleNamespace(body={"code": "AllocationQuota.FreeTierOnly"}))
+    assert "免费额度已用尽" in message
+    assert "重试" in message
 
 
 def test_realtime_url_uses_configured_endpoint_and_model():
