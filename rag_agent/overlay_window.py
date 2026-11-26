@@ -163,14 +163,15 @@ class OverlayWindow:
                 self.events.put({"error": "通话页未响应操作，请确认网页仍打开"})
         threading.Thread(target=deliver, daemon=True).start()
 
-    def action_button(self, x, y, width, label, tag, action, *, selected=False):
-        fill = "#4167e8" if selected else "#ffffff"
-        color = "#ffffff" if selected else "#354861"
+    def action_button(self, x, y, width, label, tag, action, *, selected=False, enabled=True):
+        fill = "#4167e8" if selected and enabled else "#ffffff" if enabled else "#edf0f5"
+        color = "#ffffff" if selected and enabled else "#354861" if enabled else "#8995a8"
         self.canvas.create_rectangle(x, y, x + width, y + 36, fill=fill,
                                      outline="#cbd6ea" if not selected else "", tags=tag)
         self.canvas.create_text(x + 10, y + 8, text=label, anchor="nw", fill=color,
                                 font=("Microsoft YaHei UI", 9, "bold"), tags=tag)
-        self.canvas.tag_bind(tag, "<Button-1>", lambda _: self.send_command(action))
+        if enabled:
+            self.canvas.tag_bind(tag, "<Button-1>", lambda _: self.send_command(action))
 
     def draw(self):
         canvas = self.canvas
@@ -212,21 +213,17 @@ class OverlayWindow:
         canvas.tag_bind("settings", "<Button-1>", lambda _: self.toggle_settings())
         y += 43
         if self.settings_open:
-            if has_session:
-                for action, label, key in (("ai", "AI 回答", "ai_enabled"),
-                                           ("assess", "回答与评价", "assess_enabled"),
-                                           ("bleed", "防串音", "bleed_enabled")):
-                    active = bool(self.snapshot.get(key))
-                    self.action_button(10, y, width - 20, f"{label}   {'已开启' if active else '已关闭'}",
-                                       f"switch_{action}", action, selected=active)
-                    y += 43
-                self.text(14, y, "AI 开关只处理开启后新听到的问题；关闭后会隐藏已有输出。",
-                          width - 28, color="#667892", size=9)
-                y += 39
-            else:
-                self.text(14, y, "在网页开始会话后，可在这里开启 AI 回答、回答评价和防串音。",
-                          width - 28, color="#667892", size=9)
-                y += 39
+            for action, label, key in (("ai", "AI 回答", "ai_enabled"),
+                                       ("assess", "回答与评价", "assess_enabled"),
+                                       ("bleed", "防串音", "bleed_enabled")):
+                active = bool(self.snapshot.get(key))
+                state = "已开启" if active else "已关闭" if has_session else "开始会话后可用"
+                self.action_button(10, y, width - 20, f"{label}   {state}",
+                                   f"switch_{action}", action, selected=active, enabled=has_session)
+                y += 43
+            self.text(14, y, "AI 开关只处理开启后新听到的问题；关闭后会隐藏已有输出。",
+                      width - 28, color="#667892", size=9)
+            y += 39
         for role, title in (("interviewer", "面试官 · 电脑声音"), ("me", "我 · 麦克风")):
             preview = self.snapshot.get(f"{role}_preview", "") or "等待语音…"
             canvas.create_rectangle(10, y, width - 10, y + 58, fill="#f9fbff", outline="#dfe7f2")
