@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 
 STATE_URL = "http://127.0.0.1:8000/api/live/overlay/state"
+COMMAND_URL = "http://127.0.0.1:8000/api/live/overlay/command"
 LIVE_URL = "http://127.0.0.1:8000/live"
 WS_EX_NOACTIVATE = 0x08000000
 GWL_EXSTYLE = -20
@@ -112,6 +113,7 @@ class OverlayWindow:
                          "interviewer_preview": "", "me_preview": ""}
         self.updated_at = ""
         self.drag_state = None
+        self.settings_open = False
         threading.Thread(target=self.poll, daemon=True).start()
         self.root.after(100, self.receive)
         self.draw()
@@ -146,6 +148,30 @@ class OverlayWindow:
         bounds = self.canvas.bbox(item)
         return (bounds[3] - bounds[1]) if bounds else 0
 
+    def send_command(self, action):
+        client_id = self.snapshot.get("client_id")
+        if not client_id:
+            return
+        def deliver():
+            try:
+                body = json.dumps({"action": action, "client_id": client_id}).encode("utf-8")
+                request = Request(COMMAND_URL, data=body, headers={
+                    "Content-Type": "application/json", "X-Atlas-Overlay": "atlas-live"}, method="POST")
+                with urlopen(request, timeout=3):
+                    pass
+            except (OSError, ValueError):
+                self.events.put({"error": "通话页未响应操作，请确认网页仍打开"})
+        threading.Thread(target=deliver, daemon=True).start()
+
+    def action_button(self, x, y, width, label, tag, action, *, selected=False):
+        fill = "#4167e8" if selected else "#ffffff"
+        color = "#ffffff" if selected else "#354861"
+        self.canvas.create_rectangle(x, y, x + width, y + 36, fill=fill,
+                                     outline="#cbd6ea" if not selected else "", tags=tag)
+        self.canvas.create_text(x + 10, y + 8, text=label, anchor="nw", fill=color,
+                                font=("Microsoft YaHei UI", 9, "bold"), tags=tag)
+        self.canvas.tag_bind(tag, "<Button-1>", lambda _: self.send_command(action))
+
     def draw(self):
         canvas = self.canvas
         old_bottom = canvas.yview()[1] >= 0.96
@@ -171,6 +197,36 @@ class OverlayWindow:
             self.text(14, y + 48, "已有通话页可直接切回；在网页授权共享音频和麦克风。",
                       width - 28, color="#667892", size=9)
             y += 78
+        has_session = self.snapshot.get("has_session", False)
+        has_entries = self.snapshot.get("has_entries", False)
+        if running or has_entries:
+            half = (width - 30) // 2
+            if running:
+                self.action_button(10, y, half, "结束会话", "end_session", "end")
+            if has_entries:
+                self.action_button(width - 10 - half, y, half, "导出记录", "export_session", "export")
+            y += 46
+        canvas.create_rectangle(10, y, width - 10, y + 35, fill="#eaf0ff", outline="", tags="settings")
+        canvas.create_text(20, y + 8, text=f"AI 辅助设置 {'▴' if self.settings_open else '▾'}",
+                           anchor="nw", fill="#315cbd", font=("Microsoft YaHei UI", 10, "bold"), tags="settings")
+        canvas.tag_bind("settings", "<Button-1>", lambda _: self.toggle_settings())
+        y += 43
+        if self.settings_open:
+            if has_session:
+                for action, label, key in (("ai", "AI 回答", "ai_enabled"),
+                                           ("assess", "回答与评价", "assess_enabled"),
+                                           ("bleed", "防串音", "bleed_enabled")):
+                    active = bool(self.snapshot.get(key))
+                    self.action_button(10, y, width - 20, f"{label}   {'已开启' if active else '已关闭'}",
+                                       f"switch_{action}", action, selected=active)
+                    y += 43
+                self.text(14, y, "AI 开关只处理开启后新听到的问题；关闭后会隐藏已有输出。",
+                          width - 28, color="#667892", size=9)
+                y += 39
+            else:
+                self.text(14, y, "在网页开始会话后，可在这里开启 AI 回答、回答评价和防串音。",
+                          width - 28, color="#667892", size=9)
+                y += 39
         for role, title in (("interviewer", "面试官 · 电脑声音"), ("me", "我 · 麦克风")):
             preview = self.snapshot.get(f"{role}_preview", "") or "等待语音…"
             canvas.create_rectangle(10, y, width - 10, y + 58, fill="#f9fbff", outline="#dfe7f2")
@@ -213,6 +269,10 @@ class OverlayWindow:
         else:
             self.drag_state = ("move", event.x_root - self.root.winfo_x(),
                                event.y_root - self.root.winfo_y())
+
+    def toggle_settings(self):
+        self.settings_open = not self.settings_open
+        self.draw()
 
     def start_resize(self, event):
         self.drag_state = ("resize", event.x_root, event.y_root,

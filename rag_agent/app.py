@@ -11,7 +11,7 @@ from openai import APIConnectionError, APITimeoutError
 from pydantic import BaseModel, Field
 from .engine import Engine
 from .live_audio import relay_audio
-from .overlay_state import OverlaySnapshot, current as overlay_current, update as overlay_update
+from .overlay_state import OverlaySnapshot, current as overlay_current, update as overlay_update, enqueue as overlay_enqueue, take as overlay_take
 
 engine = Engine()
 _overlay_process: subprocess.Popen | None = None
@@ -77,6 +77,28 @@ async def publish_overlay(snapshot: OverlaySnapshot, x_atlas_overlay: str | None
     check_overlay_request(x_atlas_overlay)
     overlay_update(snapshot)
     return {"ok": True}
+
+
+class OverlayCommand(BaseModel):
+    action: str
+    client_id: str
+
+
+@app.post("/api/live/overlay/command")
+async def overlay_command(command: OverlayCommand, x_atlas_overlay: str | None = Header(default=None)):
+    check_overlay_request(x_atlas_overlay)
+    if command.action not in {"ai", "assess", "bleed", "end", "export"}:
+        raise HTTPException(400, "未知浮窗操作")
+    if command.client_id != overlay_current()["snapshot"]["client_id"] or not command.client_id:
+        raise HTTPException(409, "通话页未连接")
+    overlay_enqueue(command.action)
+    return {"ok": True}
+
+
+@app.get("/api/live/overlay/commands")
+async def overlay_commands(client_id: str, x_atlas_overlay: str | None = Header(default=None)):
+    check_overlay_request(x_atlas_overlay)
+    return {"commands": overlay_take(client_id)}
 
 
 @app.post("/api/live/overlay/open")

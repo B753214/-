@@ -1,5 +1,6 @@
 const ui = Object.fromEntries(['live-panel','panel-mount','start','end','float','native-float','export','ai-options','ai-switch','assess-switch','bleed-switch','session-state','status','interviewer-preview','me-preview','count','log'].map(id => [id, document.getElementById(id)]));
 const storeKey = 'atlas-live-session';
+const overlayClientId = crypto.randomUUID();
 let session = { startedAt: null, endedAt: null, entries: [] };
 try { session = JSON.parse(sessionStorage.getItem(storeKey)) || session; } catch {}
 if (session.startedAt && !session.endedAt) session.endedAt = new Date().toISOString();
@@ -133,7 +134,10 @@ function overlaySnapshot() {
     }
     return item;
   });
-  return { running, status: ui.status.textContent.slice(0, 400),
+  return { client_id: overlayClientId, running, has_session: !!session.startedAt,
+    has_entries: !!session.entries.length,
+    ai_enabled: ui['ai-switch'].checked, assess_enabled: ui['assess-switch'].checked,
+    bleed_enabled: ui['bleed-switch'].checked, status: ui.status.textContent.slice(0, 400),
     interviewer_preview: ui['interviewer-preview'].textContent.slice(0, 500),
     me_preview: ui['me-preview'].textContent.slice(0, 500), entries };
 }
@@ -146,6 +150,25 @@ function scheduleOverlayPublish() {
         body: JSON.stringify(overlaySnapshot()), keepalive: true }))
       .catch(() => { /* The live page can still run without the optional native overlay. */ });
   }, 120);
+}
+
+let overlayCommandPolling = false;
+async function pollOverlayCommands() {
+  if (overlayCommandPolling) return;
+  overlayCommandPolling = true;
+  try {
+    const response = await fetch(`/api/live/overlay/commands?client_id=${encodeURIComponent(overlayClientId)}`,
+      { headers: { 'X-Atlas-Overlay': 'atlas-live' } });
+    if (!response.ok) return;
+    for (const action of (await response.json()).commands || []) {
+      if (action === 'ai' && !ui['ai-switch'].disabled) ui['ai-switch'].click();
+      if (action === 'assess' && !ui['assess-switch'].disabled) ui['assess-switch'].click();
+      if (action === 'bleed') ui['bleed-switch'].click();
+      if (action === 'end' && running) ui.end.click();
+      if (action === 'export' && session.entries.length) ui.export.click();
+    }
+  } catch { /* The browser page remains usable if the optional overlay is unavailable. */ }
+  finally { overlayCommandPolling = false; }
 }
 function addTranscript(role, text) {
   if (!text.trim()) return null;
@@ -500,6 +523,7 @@ ui.end.onclick = endSession;
 ui.float.onclick = toggleFloat;
 ui['native-float'].onclick = openNativeFloat;
 ui.export.onclick = exportSession;
+ui['bleed-switch'].onchange = scheduleOverlayPublish;
 ui['ai-switch'].onchange = () => {
   aiEpoch++; interviewerBuffer = [];
   if (!answerVisible()) { answerEpoch++; activeAnswerController?.abort(); }
@@ -528,3 +552,4 @@ ui['assess-switch'].onchange = () => {
 };
 persist(); renderLog();
 setInterval(scheduleOverlayPublish, 3000);
+setInterval(pollOverlayCommands, 500);
